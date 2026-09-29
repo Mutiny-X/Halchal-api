@@ -74,7 +74,17 @@ export class CampaignsController {
   @UseInterceptors(
     FileInterceptor("file", {
       storage: memoryStorage(),
-      limits: { fileSize: 200 * 1024 * 1024 },
+      // 2GB, not the 5-10GB actually asked for — memoryStorage() buffers
+      // the entire file into process memory before it ever reaches R2
+      // (object-storage.service.ts sends it as one Buffer via a single
+      // PutObjectCommand), and S3/R2 hard-caps a single PutObject at 5GB
+      // regardless of this setting. Genuinely supporting multi-GB files
+      // needs a streaming/multipart-upload rework (ideally direct-to-R2
+      // via a presigned URL, bypassing this server for the actual
+      // bytes) — this is a stopgap that raises headroom without that
+      // rework, chosen deliberately over the larger sizes to keep the
+      // in-memory-buffer risk on this shared server bounded.
+      limits: { fileSize: 2 * 1024 * 1024 * 1024 },
       fileFilter: imageOrVideoFileFilter,
     }),
   )
