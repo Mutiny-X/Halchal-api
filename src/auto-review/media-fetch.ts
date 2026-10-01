@@ -47,31 +47,45 @@ function resolveDriveDirectDownloadUrl(url: string): string | null {
   return `https://drive.google.com/uc?export=download&id=${encodeURIComponent(fileId)}`;
 }
 
+function extractHiddenInputValue(html: string, name: string): string | null {
+  const match = html.match(new RegExp(`name="${name}"\\s+value="([^"]*)"`));
+  return match?.[1] ?? null;
+}
+
 /** Drive shows an HTML "can't scan this file for viruses, download anyway?"
  * interstitial in place of the real bytes for some larger/riskier files —
  * this is a normal, click-through-able page for a human in a browser, but
- * an automated fetch just sees HTML where it expected the file. The page
- * embeds a real download link with a confirm token; extracting that token
- * and retrying (with the interstitial response's own cookie, which Drive
- * requires on the follow-up request) gets the actual file the same way a
- * person clicking "Download anyway" would, instead of giving up. Returns
- * the original interstitial response unchanged if no token is found (the
- * caller's existing HTML-content-type check still catches that case). */
+ * an automated fetch just sees HTML where it expected the file. The page is
+ * a GET form (action on a *different* host, drive.usercontent.google.com —
+ * not the drive.google.com/uc URL the initial request went to) whose hidden
+ * inputs (id/export/confirm/uuid) are the real download request; submitting
+ * it — with the interstitial response's own cookie, which Drive requires on
+ * the follow-up — gets the actual file the same way a person clicking
+ * "Download anyway" would. (Drive previously exposed the confirm token as a
+ * `confirm=<token>` query param on a same-host link; it now issues a fixed
+ * `confirm=t` plus a one-time `uuid` instead, submitted to the new host.)
+ * Returns the original interstitial response unchanged if the expected
+ * form fields aren't found (the caller's existing HTML-content-type check
+ * still catches that case). */
 async function followDriveInterstitialIfPresent(
   res: Response,
-  requestUrl: string,
   signal: AbortSignal,
 ): Promise<Response> {
   const contentType = res.headers.get("content-type");
   if (contentType?.split(";")[0].trim() !== "text/html") return res;
 
   const html = await res.text();
-  const confirmMatch = html.match(/confirm=([0-9A-Za-z_-]+)/);
-  if (!confirmMatch) return res;
+  const id = extractHiddenInputValue(html, "id");
+  const confirm = extractHiddenInputValue(html, "confirm");
+  const uuid = extractHiddenInputValue(html, "uuid");
+  if (!id || !confirm || !uuid) return res;
 
   const cookie = res.headers.get("set-cookie");
-  const retryUrl = new URL(requestUrl);
-  retryUrl.searchParams.set("confirm", confirmMatch[1]);
+  const retryUrl = new URL("https://drive.usercontent.google.com/download");
+  retryUrl.searchParams.set("id", id);
+  retryUrl.searchParams.set("export", extractHiddenInputValue(html, "export") ?? "download");
+  retryUrl.searchParams.set("confirm", confirm);
+  retryUrl.searchParams.set("uuid", uuid);
 
   return fetch(retryUrl.toString(), {
     signal,
@@ -130,7 +144,7 @@ export async function checkMediaUrlFetchable(url: string): Promise<MediaUrlCheck
     let res: Response;
     try {
       res = await fetch(fetchUrl, { signal: controller.signal });
-      res = await followDriveInterstitialIfPresent(res, fetchUrl, controller.signal);
+      res = await followDriveInterstitialIfPresent(res, controller.signal);
     } finally {
       clearTimeout(timer);
     }

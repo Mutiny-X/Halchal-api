@@ -170,9 +170,9 @@ describe("checkMediaUrlFetchable", () => {
     expect((result as { reason: string }).reason).toMatch(/anyone with the link/i);
   });
 
-  it("reports not fetchable, with an upload hint, when Drive's interstitial has no confirm token to follow", async () => {
+  it("reports not fetchable, with an upload hint, when Drive's interstitial has no confirm form fields to follow", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      makeResponse({ headers: { "content-type": "text/html; charset=utf-8" }, text: "<html>no token here</html>" }),
+      makeResponse({ headers: { "content-type": "text/html; charset=utf-8" }, text: "<html>no form here</html>" }),
     );
 
     const result = await checkMediaUrlFetchable("https://drive.google.com/file/d/FILEID/view");
@@ -181,12 +181,20 @@ describe("checkMediaUrlFetchable", () => {
     expect((result as { reason: string }).reason).toMatch(/upload the video from your device/i);
   });
 
-  it("follows the confirm-token link in Drive's virus-scan interstitial and reports fetchable when the retry returns real content", async () => {
+  const INTERSTITIAL_FORM_HTML =
+    '<form action="https://drive.usercontent.google.com/download" method="get">' +
+    '<input type="hidden" name="id" value="FILEID">' +
+    '<input type="hidden" name="export" value="download">' +
+    '<input type="hidden" name="confirm" value="t">' +
+    '<input type="hidden" name="uuid" value="uuid-123">' +
+    "</form>";
+
+  it("follows the hidden-form confirm fields in Drive's virus-scan interstitial and reports fetchable when the retry returns real content", async () => {
     const fetchSpy = vi.spyOn(globalThis, "fetch");
     fetchSpy.mockResolvedValueOnce(
       makeResponse({
         headers: { "content-type": "text/html; charset=utf-8" },
-        text: '<a href="/uc?export=download&confirm=abc123&id=FILEID">Download anyway</a>',
+        text: INTERSTITIAL_FORM_HTML,
       }),
     );
     fetchSpy.mockResolvedValueOnce(makeResponse({ headers: { "content-type": "video/mp4" } }));
@@ -196,10 +204,12 @@ describe("checkMediaUrlFetchable", () => {
     expect(result).toEqual({ fetchable: true });
     expect(fetchSpy).toHaveBeenCalledTimes(2);
     const retryUrl = fetchSpy.mock.calls[1][0] as string;
-    expect(retryUrl).toBe("https://drive.google.com/uc?export=download&id=FILEID&confirm=abc123");
+    expect(retryUrl).toBe(
+      "https://drive.usercontent.google.com/download?id=FILEID&export=download&confirm=t&uuid=uuid-123",
+    );
   });
 
-  it("sends the interstitial's cookie on the confirm-token retry request", async () => {
+  it("sends the interstitial's cookie on the confirm retry request", async () => {
     const fetchSpy = vi.spyOn(globalThis, "fetch");
     fetchSpy.mockResolvedValueOnce(
       makeResponse({
@@ -207,7 +217,7 @@ describe("checkMediaUrlFetchable", () => {
           "content-type": "text/html; charset=utf-8",
           "set-cookie": "download_warning=abc; Path=/",
         },
-        text: "confirm=t",
+        text: INTERSTITIAL_FORM_HTML,
       }),
     );
     fetchSpy.mockResolvedValueOnce(makeResponse({ headers: { "content-type": "video/mp4" } }));
@@ -218,12 +228,12 @@ describe("checkMediaUrlFetchable", () => {
     expect((retryOptions.headers as Record<string, string>).cookie).toBe("download_warning=abc; Path=/");
   });
 
-  it("still reports not fetchable when the confirm-token retry itself returns another interstitial", async () => {
+  it("still reports not fetchable when the confirm retry itself returns another interstitial", async () => {
     const fetchSpy = vi.spyOn(globalThis, "fetch");
     fetchSpy.mockResolvedValue(
       makeResponse({
         headers: { "content-type": "text/html; charset=utf-8" },
-        text: "confirm=t",
+        text: INTERSTITIAL_FORM_HTML,
       }),
     );
 
