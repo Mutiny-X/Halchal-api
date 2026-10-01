@@ -67,6 +67,18 @@ export class CheckSourceAssetUrlDto {
   url!: string;
 }
 
+export class PresignUploadDto {
+  @ApiProperty({ description: "Original filename, used to derive the stored file's extension" })
+  @IsString()
+  @MaxLength(255)
+  fileName!: string;
+
+  @ApiProperty({ description: "Declared MIME type — must be image/* or video/*" })
+  @IsString()
+  @MaxLength(100)
+  contentType!: string;
+}
+
 export class CreateCampaignDto {
   @ApiPropertyOptional()
   @IsOptional()
