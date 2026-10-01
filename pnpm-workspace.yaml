@@ -1,2 +1,15 @@
 packages:
   - "packages/*"
+
+overrides:
+  # Without this, @aws-sdk/client-s3 and its own transitive deps resolve
+  # two different copies of @smithy/types (one via @aws-sdk/types, one
+  # direct) — harmless at runtime, but TypeScript treats them as distinct
+  # types, breaking type-checking anywhere client-s3's own types get
+  # compared against something else's (e.g. @aws-sdk/s3-request-presigner's
+  # getSignedUrl). A similar duplicate exists for @smithy/core (pulled in
+  # a second, newer copy via s3-request-presigner's own
+  # @aws-sdk/signature-v4-multi-region dependency) that this override
+  # doesn't fully resolve — see object-storage.service.ts's presignUpload
+  # for the remaining, deliberate type assertion that works around it.
+  "@smithy/types": "^4.19.0"

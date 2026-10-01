@@ -30,6 +30,7 @@ import { CampaignsService } from "./campaigns.service";
 import {
   CheckSourceAssetUrlDto,
   CreateCampaignDto,
+  PresignUploadDto,
   UpdateCampaignDto,
   UpdateCampaignStepDto,
 } from "./dto/campaign.dto";
@@ -114,6 +115,33 @@ export class CampaignsController {
       ...(await this.storage.saveUploadedFile("reference-assets", file)),
       type,
     };
+  }
+
+  // Direct-to-R2 alternative to reference-assets/upload above, for files
+  // too large to safely buffer through this server (that route's own
+  // memoryStorage() holds the whole file in process memory — fine up to
+  // its 2GB limit, but multi-GB files risk crashing the backend for every
+  // user, not just this upload). The client PUTs the bytes straight to R2
+  // using the returned uploadUrl; this server never touches them, so size
+  // is bounded only by R2's own 5GB single-PUT ceiling. Trade-off: unlike
+  // uploadReferenceAsset above, this can't run assertVideoIsPlayable()
+  // against the file first, since the bytes never pass through here —
+  // an invalid/corrupt video won't be caught at upload time this way.
+  // R2-only — no equivalent exists for the local-disk fallback used when
+  // R2 isn't configured, so callers should fall back to the multipart
+  // upload route above in that case.
+  @Post("reference-assets/presign-upload")
+  @HttpCode(HttpStatus.OK)
+  async presignReferenceAssetUpload(@Body() dto: PresignUploadDto) {
+    if (!dto.contentType.startsWith("image/") && !dto.contentType.startsWith("video/")) {
+      throw new BadRequestException("Only image and video files are allowed");
+    }
+    if (!this.storage.isR2Configured()) {
+      throw new BadRequestException(
+        "Direct upload isn't available — object storage isn't configured on this server",
+      );
+    }
+    return this.storage.presignUpload("reference-assets", dto.fileName, dto.contentType);
   }
 
   @Post("source-assets/check-url")
