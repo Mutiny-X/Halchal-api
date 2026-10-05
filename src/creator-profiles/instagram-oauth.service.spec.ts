@@ -79,6 +79,18 @@ describe("InstagramOAuthService.getMediaInsightsForPost", () => {
     expect(result).toBeNull();
   });
 
+  it("returns null and logs the failure, not a 'no match', when the media list comes back without data", async () => {
+    prisma.instagramConnection.findUnique.mockResolvedValue(connectedRow());
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(makeResponse({ paging: {} }));
+    const warnSpy = vi.spyOn((service as unknown as { logger: { warn: (m: string) => void } }).logger, "warn");
+
+    const result = await service.getMediaInsightsForPost("profile-1", "https://www.instagram.com/reel/Cxyz123/");
+
+    expect(result).toBeNull();
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("media list returned no data"));
+    expect(warnSpy).not.toHaveBeenCalledWith(expect.stringContaining("No Instagram media match"));
+  });
+
   it("matches the post by shortcode (ignoring query params/trailing slash) and returns mapped metrics", async () => {
     prisma.instagramConnection.findUnique.mockResolvedValue(connectedRow());
     const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (url) => {
