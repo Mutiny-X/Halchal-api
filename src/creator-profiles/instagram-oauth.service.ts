@@ -315,11 +315,20 @@ export class InstagramOAuthService {
       // the DB schema — creatorProfileId is @unique on this table, but
       // platformUserId isn't) stops the same Instagram account from being
       // connected to two different Halchal users at once.
+      //
+      // Must also exclude the current userId, not just creatorProfileId —
+      // CreatorProfile is unique per (userId, platform, handle), not per
+      // user, so one Halchal account can hold several profiles. A stale
+      // isConnected:true row left on this same user's OTHER profile (e.g.
+      // disconnected via one profile/screen but never cleared on another)
+      // would otherwise look identical to a genuine different-user
+      // conflict and wrongly block reconnecting your own account.
       const conflicting = await tx.instagramConnection.findFirst({
         where: {
           platformUserId: insights.igUserId,
           isConnected: true,
           NOT: { creatorProfileId },
+          userId: { not: userId },
         },
         select: { id: true },
       });
