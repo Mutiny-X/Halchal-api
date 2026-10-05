@@ -426,7 +426,7 @@ describe("InstagramOAuthService.complete", () => {
     expect(prisma.instagramConnection.upsert).not.toHaveBeenCalled();
   });
 
-  it("queries the conflict check by the stable platformUserId, excluding this profile's own row", async () => {
+  it("queries the conflict check by the stable platformUserId, excluding this profile's own row and this same user", async () => {
     prisma.instagramOAuthTransaction.findUnique.mockResolvedValue(oauthTransaction());
     prisma.instagramConnection.findFirst.mockResolvedValue(null);
 
@@ -438,10 +438,12 @@ describe("InstagramOAuthService.complete", () => {
           platformUserId: "ig-user-999",
           isConnected: true,
           NOT: { creatorProfileId: PROFILE_ID },
+          userId: { not: USER_ID },
         }),
       }),
     );
   });
+
 
   it("completes normally when no other profile has this Instagram account connected", async () => {
     prisma.instagramOAuthTransaction.findUnique.mockResolvedValue(oauthTransaction());
