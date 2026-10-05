@@ -444,6 +444,17 @@ export class UsersService {
         data: { revokedAt: new Date() },
       }),
       this.prisma.deviceToken.deleteMany({ where: { userId } }),
+      // This is a soft delete (the User row survives with isActive:false
+      // below), so the schema's onDelete:Cascade on these two relations
+      // never fires — without this, a deleted user's platformUserId claim
+      // on their Instagram/YouTube account stays isConnected:true forever,
+      // permanently blocking that same platform account from reconnecting
+      // under a new signup (confirmed live: deleting and re-signing up
+      // didn't resolve an Instagram "already linked to another account"
+      // error, because the stale row was never actually anyone's problem
+      // to begin with — it belonged to this now-deleted account).
+      this.prisma.instagramConnection.deleteMany({ where: { userId } }),
+      this.prisma.youtubeConnection.deleteMany({ where: { userId } }),
       this.prisma.user.update({
         where: { id: userId },
         data: {
