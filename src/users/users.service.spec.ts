@@ -9,6 +9,11 @@ function makePrisma() {
       findUnique: vi.fn(),
       update: vi.fn(),
     },
+    refreshToken: { updateMany: vi.fn() },
+    deviceToken: { deleteMany: vi.fn() },
+    instagramConnection: { deleteMany: vi.fn() },
+    youtubeConnection: { deleteMany: vi.fn() },
+    $transaction: vi.fn((ops: unknown[]) => Promise.all(ops)),
   };
 }
 
@@ -184,6 +189,26 @@ describe("UsersService", () => {
       const result = await service.submitAadhaar("user-1", "https://example.com/a.jpg", buffer, "image/jpeg");
 
       expect(result.aadhaarFailureReason).toContain("fraud");
+    });
+  });
+
+  describe("deleteMe", () => {
+    it("releases this user's Instagram/YouTube connections, not just scrubbing the User row", async () => {
+      await service.deleteMe("user-1");
+
+      // A soft delete (the User row survives below with isActive:false)
+      // never triggers the schema's onDelete:Cascade — without an explicit
+      // cleanup here, a deleted user's platformUserId claim would stay
+      // isConnected:true forever and block that same account from ever
+      // reconnecting under a new signup.
+      expect(prisma.instagramConnection.deleteMany).toHaveBeenCalledWith({ where: { userId: "user-1" } });
+      expect(prisma.youtubeConnection.deleteMany).toHaveBeenCalledWith({ where: { userId: "user-1" } });
+      expect(prisma.user.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: "user-1" },
+          data: expect.objectContaining({ isActive: false }),
+        }),
+      );
     });
   });
 });
