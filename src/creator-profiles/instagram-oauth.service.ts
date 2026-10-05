@@ -697,7 +697,10 @@ export class InstagramOAuthService {
     for (let page = 0; page < maxPages && nextUrl; page++) {
       const mediaRes: InstagramMediaResponse =
         await this.instagramGraphFetch<InstagramMediaResponse>(nextUrl);
-      const match = (mediaRes.data ?? []).find(
+      if (!mediaRes.data) {
+        throw new Error(`media list returned no data: ${JSON.stringify(mediaRes).slice(0, 300)}`);
+      }
+      const match = mediaRes.data.find(
         (m) => m.permalink && extractInstagramShortcode(m.permalink) === targetShortcode,
       );
       if (match) return { item: match, accessToken };
