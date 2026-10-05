@@ -1474,6 +1474,11 @@ export class ParticipationService {
     }
     this.logger.log(`refreshDeliverableViews: ${deliverableId} metrics source = ${metricsSource}`);
 
+    // A failed refresh must not overwrite the last good numbers with zeros.
+    if (metricsSource === "unavailable") {
+      return { updated: deliverable, metricsSource };
+    }
+
     const updated = await this.prisma.formatDeliverable.update({
       where: { id: deliverableId },
       data: {

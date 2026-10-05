@@ -897,22 +897,14 @@ describe("ParticipationService", () => {
       expect(result.metricsSource).toBe("instagram_insights");
     });
 
-    it("reports zero metrics with metricsSource: unavailable when Instagram Insights has no data — never falls back to Apify", async () => {
+    it("keeps previously stored metrics and reports unavailable when Instagram Insights has no data — never falls back to Apify", async () => {
       prisma.formatDeliverable.findUnique.mockResolvedValue(mockDeliverable());
       instagramOAuth.getMediaInsightsForPost.mockResolvedValue(null);
-      prisma.formatDeliverable.update.mockResolvedValue({
-        id: "d1", viewCount: 0, reach: 0, likeCount: 0, commentCount: 0, shareCount: 0,
-      });
 
       const result = await service.refreshDeliverableViews("creator-1", "d1");
 
       expect(apify.getViewCount).not.toHaveBeenCalled();
-      expect(prisma.formatDeliverable.update).toHaveBeenCalledWith(
-        expect.objectContaining({
-          data: { viewCount: 0, reach: 0, likeCount: 0, commentCount: 0, shareCount: 0 },
-        }),
-      );
-      expect(result.viewCount).toBe(0);
+      expect(prisma.formatDeliverable.update).not.toHaveBeenCalled();
       expect(result.metricsSource).toBe("unavailable");
     });
 
