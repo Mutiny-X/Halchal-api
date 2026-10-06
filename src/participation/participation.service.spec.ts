@@ -34,6 +34,7 @@ function makePrisma() {
       findMany: vi.fn(),
       create: vi.fn(),
     },
+    deliverableInsightSnapshot: { create: vi.fn().mockResolvedValue({}) },
     payoutMethod: { findFirst: vi.fn() },
     $transaction: vi.fn(),
     $queryRaw: vi.fn().mockResolvedValue([{ total: 0n }]),
@@ -852,13 +853,22 @@ describe("ParticipationService", () => {
   });
 
   describe("refreshDeliverableViews", () => {
-    function mockDeliverable(overrides: Partial<{ viewCount: number }> = {}) {
+    function mockDeliverable(
+      overrides: Partial<{
+        viewCount: number; reach: number; likeCount: number; commentCount: number; shareCount: number;
+      }> = {},
+    ) {
       const base = {
         id: "d1",
         creatorId: undefined as unknown, // set per-call below
         status: FormatDeliverableStatus.live_submitted,
         platform: "instagram_reel",
         livePostUrl: "https://instagram.com/reel/1",
+        viewCount: 0,
+        reach: 0,
+        likeCount: 0,
+        commentCount: 0,
+        shareCount: 0,
         participation: {
           creatorId: "creator-1",
           creatorProfileId: "profile-1",
@@ -897,15 +907,170 @@ describe("ParticipationService", () => {
       expect(result.metricsSource).toBe("instagram_insights");
     });
 
-    it("keeps previously stored metrics and reports unavailable when Instagram Insights has no data — never falls back to Apify", async () => {
-      prisma.formatDeliverable.findUnique.mockResolvedValue(mockDeliverable());
+    it("keeps the last known metrics with metricsSource: unavailable when Instagram Insights has no data — never writes zeros, never falls back to Apify", async () => {
+      prisma.formatDeliverable.findUnique.mockResolvedValue(
+        mockDeliverable({
+          viewCount: 50_000, reach: 40_000, likeCount: 2_000, commentCount: 100, shareCount: 10,
+        } as never),
+      );
       instagramOAuth.getMediaInsightsForPost.mockResolvedValue(null);
 
       const result = await service.refreshDeliverableViews("creator-1", "d1");
 
       expect(apify.getViewCount).not.toHaveBeenCalled();
       expect(prisma.formatDeliverable.update).not.toHaveBeenCalled();
+      expect(realtime.emitDeliverableMetricsUpdated).not.toHaveBeenCalled();
+      expect(result.viewCount).toBe(50_000);
+      expect(result.likeCount).toBe(2_000);
       expect(result.metricsSource).toBe("unavailable");
+    });
+
+    it("writes only the metrics Instagram reported on a partial response — missing ones keep their last known value", async () => {
+      prisma.formatDeliverable.findUnique.mockResolvedValue(
+        mockDeliverable({
+          viewCount: 50_000, reach: 40_000, likeCount: 2_000, commentCount: 100, shareCount: 10,
+        } as never),
+      );
+      instagramOAuth.getMediaInsightsForPost.mockResolvedValue({ viewCount: 60_000, platform: "instagram" });
+      prisma.formatDeliverable.update.mockResolvedValue({
+        id: "d1", viewCount: 60_000, reach: 40_000, likeCount: 2_000, commentCount: 100, shareCount: 10,
+      });
+
+      const result = await service.refreshDeliverableViews("creator-1", "d1");
+
+      expect(prisma.formatDeliverable.update).toHaveBeenCalledWith(
+        expect.objectContaining({ data: { viewCount: 60_000 } }),
+      );
+      expect(result.viewCount).toBe(60_000);
+      expect(result.likeCount).toBe(2_000);
+    });
+
+    it("appends a history snapshot with saves, the media id and the raw metrics on a complete response", async () => {
+      prisma.formatDeliverable.findUnique.mockResolvedValue(mockDeliverable());
+      instagramOAuth.getMediaInsightsForPost.mockResolvedValue({
+        viewCount: 42_000, reach: 40_000, likeCount: 100, commentCount: 5, shareCount: 2, saveCount: 9,
+        platformMediaId: "media-42",
+        rawMetrics: { views: 42_000, reach: 40_000, likes: 100, comments: 5, shares: 2, saved: 9 },
+        platform: "instagram",
+      });
+      prisma.formatDeliverable.update.mockResolvedValue({
+        id: "d1", viewCount: 42_000, reach: 40_000, likeCount: 100, commentCount: 5, shareCount: 2,
+      });
+
+      await service.refreshDeliverableViews("creator-1", "d1");
+
+      // saveCount/platformMediaId/rawMetrics are history-only — never written to the deliverable row.
+      expect(prisma.formatDeliverable.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: { viewCount: 42_000, reach: 40_000, likeCount: 100, commentCount: 5, shareCount: 2 },
+        }),
+      );
+      expect(prisma.deliverableInsightSnapshot.create).toHaveBeenCalledTimes(1);
+      expect(prisma.deliverableInsightSnapshot.create).toHaveBeenCalledWith({
+        data: {
+          deliverableId: "d1",
+          platform: "instagram_reel",
+          livePostUrl: "https://instagram.com/reel/1",
+          platformMediaId: "media-42",
+          viewCount: 42_000,
+          reach: 40_000,
+          likeCount: 100,
+          commentCount: 5,
+          shareCount: 2,
+          saveCount: 9,
+          source: "instagram_insights_manual",
+          status: "success",
+          errorCode: null,
+          rawMetrics: { views: 42_000, reach: 40_000, likes: 100, comments: 5, shares: 2, saved: 9 },
+        },
+      });
+    });
+
+    it("records a partial snapshot, carrying the last known values for what Instagram didn't return", async () => {
+      prisma.formatDeliverable.findUnique.mockResolvedValue(mockDeliverable());
+      instagramOAuth.getMediaInsightsForPost.mockResolvedValue({
+        viewCount: 60_000, rawMetrics: { views: 60_000 }, platform: "instagram",
+      });
+      prisma.formatDeliverable.update.mockResolvedValue({
+        id: "d1", viewCount: 60_000, reach: 40_000, likeCount: 2_000, commentCount: 100, shareCount: 10,
+      });
+
+      await service.refreshDeliverableViews("creator-1", "d1");
+
+      expect(prisma.deliverableInsightSnapshot.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          status: "partial",
+          viewCount: 60_000,
+          likeCount: 2_000,
+          rawMetrics: { views: 60_000 },
+        }),
+      });
+    });
+
+    it("records an 'unavailable' snapshot with the last known values when Instagram returns nothing", async () => {
+      prisma.formatDeliverable.findUnique.mockResolvedValue(
+        mockDeliverable({ viewCount: 50_000, likeCount: 2_000 } as never),
+      );
+      instagramOAuth.getMediaInsightsForPost.mockResolvedValue(null);
+
+      await service.refreshDeliverableViews("creator-1", "d1");
+
+      expect(prisma.deliverableInsightSnapshot.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          status: "unavailable",
+          errorCode: "no_data",
+          platformMediaId: null,
+          viewCount: 50_000,
+          likeCount: 2_000,
+          rawMetrics: {},
+        }),
+      });
+    });
+
+    it("does not write a snapshot for non-Instagram platforms", async () => {
+      prisma.formatDeliverable.findUnique.mockResolvedValue(
+        mockDeliverable({ platform: "youtube_shorts", livePostUrl: "https://youtube.com/shorts/abc" } as never),
+      );
+      apify.getViewCount.mockResolvedValue({
+        viewCount: 5_000, reach: 0, likeCount: 0, commentCount: 0, shareCount: 0, platform: "youtube",
+      });
+      prisma.formatDeliverable.update.mockResolvedValue({
+        id: "d1", viewCount: 5_000, reach: 0, likeCount: 0, commentCount: 0, shareCount: 0,
+      });
+
+      await service.refreshDeliverableViews("creator-1", "d1");
+
+      expect(prisma.deliverableInsightSnapshot.create).not.toHaveBeenCalled();
+    });
+
+    it("still saves the metrics and returns normally when the snapshot write itself fails", async () => {
+      prisma.formatDeliverable.findUnique.mockResolvedValue(mockDeliverable());
+      instagramOAuth.getMediaInsightsForPost.mockResolvedValue({ viewCount: 70, platform: "instagram" });
+      prisma.formatDeliverable.update.mockResolvedValue({
+        id: "d1", viewCount: 70, reach: 0, likeCount: 0, commentCount: 0, shareCount: 0,
+      });
+      prisma.deliverableInsightSnapshot.create.mockRejectedValueOnce(new Error("db down"));
+
+      const result = await service.refreshDeliverableViews("creator-1", "d1");
+
+      expect(result.viewCount).toBe(70);
+      expect(realtime.emitDeliverableMetricsUpdated).toHaveBeenCalledTimes(1);
+    });
+
+    it("still writes a genuine zero when Instagram itself reports 0", async () => {
+      prisma.formatDeliverable.findUnique.mockResolvedValue(mockDeliverable());
+      instagramOAuth.getMediaInsightsForPost.mockResolvedValue({
+        viewCount: 0, likeCount: 0, platform: "instagram",
+      });
+      prisma.formatDeliverable.update.mockResolvedValue({
+        id: "d1", viewCount: 0, reach: 0, likeCount: 0, commentCount: 0, shareCount: 0,
+      });
+
+      await service.refreshDeliverableViews("creator-1", "d1");
+
+      expect(prisma.formatDeliverable.update).toHaveBeenCalledWith(
+        expect.objectContaining({ data: { viewCount: 0, likeCount: 0 } }),
+      );
     });
 
     it("uses Apify (not Instagram Insights) for non-Instagram platforms", async () => {
@@ -1006,7 +1171,7 @@ describe("ParticipationService", () => {
       );
     });
 
-    it("still auto-pauses at 100% and reports paused status in the realtime payload", async () => {
+    it("automatically closes at 100% and reports closed status in the realtime payload", async () => {
       prisma.formatDeliverable.findUnique.mockResolvedValue(mockDeliverable());
       instagramOAuth.getMediaInsightsForPost.mockResolvedValue({
         viewCount: 1_000, reach: 0, likeCount: 0, commentCount: 0, shareCount: 0, platform: "instagram",
@@ -1020,10 +1185,10 @@ describe("ParticipationService", () => {
 
       expect(prisma.campaign.update).toHaveBeenCalledWith({
         where: { id: "camp-1" },
-        data: { status: CampaignStatus.paused },
+        data: { status: CampaignStatus.closed },
       });
       expect(realtime.emitCampaignUpdated).toHaveBeenCalledWith(
-        expect.objectContaining({ id: "camp-1", status: CampaignStatus.paused, poolUtilizationBps: 10000 }),
+        expect.objectContaining({ id: "camp-1", status: CampaignStatus.closed, poolUtilizationBps: 10000 }),
       );
     });
   });
@@ -1154,6 +1319,147 @@ describe("ParticipationService", () => {
       );
     });
 
+    async function runHourlyWithFakeTimers() {
+      vi.useFakeTimers();
+      const promise = service.refreshActiveDeliverableViews();
+      await vi.runAllTimersAsync();
+      await promise;
+      vi.useRealTimers();
+    }
+
+    it("hourly views sweep writes only the view count to the deliverable, and appends an hourly history row that vouches for views only", async () => {
+      prisma.formatDeliverable.findMany
+        .mockResolvedValueOnce([trackableDeliverable({ id: "d1" })])
+        .mockResolvedValue([]);
+      instagramOAuth.getMediaInsightsForPost.mockResolvedValue({
+        viewCount: 900, reach: 800, likeCount: 50, commentCount: 5, shareCount: 2, saveCount: 7,
+        platformMediaId: "media-1", rawMetrics: { views: 900, reach: 800 }, platform: "instagram",
+      });
+      prisma.formatDeliverable.update.mockResolvedValue({
+        id: "d1", viewCount: 900, reach: 0, likeCount: 0, commentCount: 0, shareCount: 0,
+      });
+
+      await runHourlyWithFakeTimers();
+
+      expect(prisma.formatDeliverable.update).toHaveBeenCalledTimes(1);
+      expect(prisma.formatDeliverable.update).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { id: "d1" }, data: { viewCount: 900 } }),
+      );
+      expect(prisma.deliverableInsightSnapshot.create).toHaveBeenCalledTimes(1);
+      expect(prisma.deliverableInsightSnapshot.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          source: "instagram_insights_hourly",
+          status: "success",
+          viewCount: 900,
+          saveCount: 0,
+          platformMediaId: "media-1",
+          rawMetrics: { views: 900 },
+        }),
+      });
+      expect(realtime.emitDeliverableMetricsUpdated).toHaveBeenCalledTimes(1);
+    });
+
+    it("hourly views sweep leaves everything untouched and records an unavailable hourly row when Instagram doesn't report views", async () => {
+      prisma.formatDeliverable.findMany
+        .mockResolvedValueOnce([trackableDeliverable({ id: "d1" })])
+        .mockResolvedValue([]);
+      instagramOAuth.getMediaInsightsForPost.mockResolvedValue({
+        likeCount: 50, platform: "instagram",
+      });
+
+      await runHourlyWithFakeTimers();
+
+      expect(prisma.formatDeliverable.update).not.toHaveBeenCalled();
+      expect(prisma.deliverableInsightSnapshot.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          source: "instagram_insights_hourly",
+          status: "unavailable",
+          errorCode: "no_data",
+        }),
+      });
+    });
+
+    it("daily sweep writes every metric and appends one history row per deliverable", async () => {
+      prisma.formatDeliverable.findMany.mockResolvedValue([
+        trackableDeliverable({ id: "d1" }),
+        trackableDeliverable({ id: "d2", livePostUrl: "https://instagram.com/reel/2" }),
+      ]);
+      instagramOAuth.getMediaInsightsForPost.mockResolvedValue({
+        viewCount: 100, reach: 90, likeCount: 10, commentCount: 1, shareCount: 0, saveCount: 3,
+        rawMetrics: { views: 100 }, platform: "instagram",
+      });
+      prisma.formatDeliverable.update.mockResolvedValue({
+        id: "d1", viewCount: 100, reach: 90, likeCount: 10, commentCount: 1, shareCount: 0,
+      });
+
+      await runSweepWithFakeTimers();
+
+      expect(prisma.formatDeliverable.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: { viewCount: 100, reach: 90, likeCount: 10, commentCount: 1, shareCount: 0 },
+        }),
+      );
+      expect(prisma.deliverableInsightSnapshot.create).toHaveBeenCalledTimes(2);
+      expect(prisma.deliverableInsightSnapshot.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({ source: "instagram_insights_daily", status: "success" }),
+      });
+    });
+
+    it("skips a sweep that's triggered while the previous one of the same kind is still running", async () => {
+      let release!: () => void;
+      prisma.formatDeliverable.findMany.mockImplementationOnce(
+        () => new Promise((resolve) => { release = () => resolve([]); }),
+      );
+
+      const first = service.refreshActiveDeliverableMetrics();
+      await service.refreshActiveDeliverableMetrics(); // overlaps — must return without querying again
+      expect(prisma.formatDeliverable.findMany).toHaveBeenCalledTimes(1);
+
+      release();
+      await first;
+
+      // Once the first run finishes, the next one is allowed again.
+      prisma.formatDeliverable.findMany.mockResolvedValue([]);
+      await service.refreshActiveDeliverableMetrics();
+      expect(prisma.formatDeliverable.findMany).toHaveBeenCalledTimes(2);
+    });
+
+    it("an hourly views sweep in progress doesn't block the daily full sweep", async () => {
+      let release!: () => void;
+      prisma.formatDeliverable.findMany.mockImplementationOnce(
+        () => new Promise((resolve) => { release = () => resolve([]); }),
+      );
+      prisma.formatDeliverable.findMany.mockResolvedValue([]);
+
+      const hourly = service.refreshActiveDeliverableViews();
+      await service.refreshActiveDeliverableMetrics();
+      expect(prisma.formatDeliverable.findMany).toHaveBeenCalledTimes(2);
+
+      release();
+      await hourly;
+    });
+
+    it("leaves a deliverable's stored metrics untouched when Instagram returns nothing for it, while still refreshing the rest", async () => {
+      prisma.formatDeliverable.findMany.mockResolvedValue([
+        trackableDeliverable({ id: "d1", viewCount: 50_000 }),
+        trackableDeliverable({ id: "d2", livePostUrl: "https://instagram.com/reel/2" }),
+      ]);
+      instagramOAuth.getMediaInsightsForPost
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce({ viewCount: 70, platform: "instagram" });
+      prisma.formatDeliverable.update.mockResolvedValue({
+        id: "d2", viewCount: 70, reach: 0, likeCount: 0, commentCount: 0, shareCount: 0,
+      });
+
+      await runSweepWithFakeTimers();
+
+      expect(prisma.formatDeliverable.update).toHaveBeenCalledTimes(1);
+      expect(prisma.formatDeliverable.update).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { id: "d2" }, data: { viewCount: 70 } }),
+      );
+      expect(realtime.emitDeliverableMetricsUpdated).toHaveBeenCalledTimes(1);
+    });
+
     it("continues the sweep past one deliverable's failure — one bad post doesn't stop the rest", async () => {
       prisma.formatDeliverable.findMany.mockResolvedValue([
         trackableDeliverable({ id: "d1", platform: "youtube_shorts", livePostUrl: "https://youtube.com/shorts/bad" }),
@@ -1174,6 +1480,261 @@ describe("ParticipationService", () => {
       expect(realtime.emitDeliverableMetricsUpdated).toHaveBeenCalledWith(
         expect.objectContaining({ deliverableId: "d2" }),
       );
+    });
+  });
+
+  describe("end-of-campaign final metrics fetch", () => {
+    function finalCandidate(overrides: Record<string, unknown> = {}) {
+      return {
+        id: "d1",
+        status: FormatDeliverableStatus.proof_approved,
+        platform: "instagram_reel",
+        livePostUrl: "https://instagram.com/reel/1",
+        viewCount: 100,
+        reach: 90,
+        likeCount: 10,
+        commentCount: 1,
+        shareCount: 0,
+        participation: {
+          id: "part-1",
+          creatorId: "creator-1",
+          creatorProfileId: "profile-1",
+          campaignId: "camp-1",
+          campaign: { id: "camp-1", status: CampaignStatus.closed, brandProfileId: "brand-1" },
+        },
+        _count: { insightSnapshots: 0 },
+        ...overrides,
+      };
+    }
+
+    const fullInsights = {
+      viewCount: 5_000, reach: 4_000, likeCount: 300, commentCount: 20, shareCount: 10, saveCount: 40,
+      platformMediaId: "media-1",
+      rawMetrics: { views: 5_000, reach: 4_000, likes: 300, comments: 20, shares: 10, saved: 40 },
+      platform: "instagram" as const,
+    };
+
+    async function withFakeTimers<T>(run: () => Promise<T>): Promise<T> {
+      vi.useFakeTimers();
+      const promise = run();
+      await vi.runAllTimersAsync();
+      const result = await promise;
+      vi.useRealTimers();
+      return result;
+    }
+
+    function liveDeliverableInCampaign() {
+      return {
+        id: "d1",
+        status: FormatDeliverableStatus.live_submitted,
+        platform: "instagram_reel",
+        livePostUrl: "https://instagram.com/reel/1",
+        viewCount: 0, reach: 0, likeCount: 0, commentCount: 0, shareCount: 0,
+        participation: {
+          creatorId: "creator-1",
+          creatorProfileId: "profile-1",
+          campaign: {
+            id: "camp-1",
+            status: CampaignStatus.live,
+            budgetPaise: 1_000_000,
+            brandProfileId: "brand-1",
+            ratePer1kPaise: 1_000,
+            maxPayoutPaise: 50_000,
+            newClipperIntakeStatus: NewClipperIntakeStatus.open,
+            poolThresholdBps: 8000,
+          },
+        },
+      };
+    }
+
+    it("is started in the background when the budget pool closes a campaign", async () => {
+      const spy = vi.spyOn(service, "finalizeCampaignMetrics").mockResolvedValue(undefined);
+      prisma.formatDeliverable.findUnique.mockResolvedValue(liveDeliverableInCampaign());
+      instagramOAuth.getMediaInsightsForPost.mockResolvedValue({ viewCount: 1_000, platform: "instagram" });
+      prisma.formatDeliverable.update.mockResolvedValue({
+        id: "d1", viewCount: 1_000, reach: 0, likeCount: 0, commentCount: 0, shareCount: 0,
+      });
+      prisma.$queryRaw.mockResolvedValue([{ total: 1_000_000n }]);
+
+      await service.refreshDeliverableViews("creator-1", "d1");
+
+      expect(spy).toHaveBeenCalledTimes(1);
+      expect(spy).toHaveBeenCalledWith("camp-1");
+    });
+
+    it("is not started while the campaign is still under budget", async () => {
+      const spy = vi.spyOn(service, "finalizeCampaignMetrics").mockResolvedValue(undefined);
+      prisma.formatDeliverable.findUnique.mockResolvedValue(liveDeliverableInCampaign());
+      instagramOAuth.getMediaInsightsForPost.mockResolvedValue({ viewCount: 1_000, platform: "instagram" });
+      prisma.formatDeliverable.update.mockResolvedValue({
+        id: "d1", viewCount: 1_000, reach: 0, likeCount: 0, commentCount: 0, shareCount: 0,
+      });
+      prisma.$queryRaw.mockResolvedValue([{ total: 500_000n }]);
+
+      await service.refreshDeliverableViews("creator-1", "d1");
+
+      expect(spy).not.toHaveBeenCalled();
+    });
+
+    it("writes every metric and one 'final' history row for each deliverable of the campaign", async () => {
+      prisma.formatDeliverable.findMany.mockResolvedValue([
+        finalCandidate({ id: "d1" }),
+        finalCandidate({ id: "d2", livePostUrl: "https://instagram.com/reel/2" }),
+      ]);
+      instagramOAuth.getMediaInsightsForPost.mockResolvedValue(fullInsights);
+      prisma.formatDeliverable.update.mockResolvedValue({
+        id: "d1", viewCount: 5_000, reach: 4_000, likeCount: 300, commentCount: 20, shareCount: 10,
+      });
+
+      await withFakeTimers(() => service.finalizeCampaignMetrics("camp-1"));
+
+      expect(prisma.formatDeliverable.update).toHaveBeenCalledTimes(2);
+      expect(prisma.formatDeliverable.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: { viewCount: 5_000, reach: 4_000, likeCount: 300, commentCount: 20, shareCount: 10 },
+        }),
+      );
+      expect(prisma.deliverableInsightSnapshot.create).toHaveBeenCalledTimes(2);
+      expect(prisma.deliverableInsightSnapshot.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          source: "instagram_insights_final",
+          status: "success",
+          saveCount: 40,
+          viewCount: 5_000,
+        }),
+      });
+      // It never touches the campaign itself — closing is not its job.
+      expect(prisma.campaign.update).not.toHaveBeenCalled();
+      expect(realtime.emitCampaignUpdated).not.toHaveBeenCalled();
+    });
+
+    it("only asks for Instagram deliverables of that campaign that don't already have a successful final row", async () => {
+      prisma.formatDeliverable.findMany.mockResolvedValue([]);
+
+      await service.finalizeCampaignMetrics("camp-1");
+
+      expect(prisma.formatDeliverable.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            platform: { startsWith: "instagram" },
+            livePostUrl: { not: null },
+            participation: { campaignId: "camp-1" },
+            insightSnapshots: {
+              none: { source: "instagram_insights_final", status: { in: ["success", "partial"] } },
+            },
+          }),
+        }),
+      );
+    });
+
+    it("retries an empty Instagram answer — three attempts in all — and records success if a later one works", async () => {
+      prisma.formatDeliverable.findMany.mockResolvedValue([finalCandidate()]);
+      instagramOAuth.getMediaInsightsForPost
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce(fullInsights);
+      prisma.formatDeliverable.update.mockResolvedValue({
+        id: "d1", viewCount: 5_000, reach: 4_000, likeCount: 300, commentCount: 20, shareCount: 10,
+      });
+
+      await withFakeTimers(() => service.finalizeCampaignMetrics("camp-1"));
+
+      expect(instagramOAuth.getMediaInsightsForPost).toHaveBeenCalledTimes(3);
+      expect(prisma.deliverableInsightSnapshot.create).toHaveBeenCalledTimes(1);
+      expect(prisma.deliverableInsightSnapshot.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({ source: "instagram_insights_final", status: "success" }),
+      });
+    });
+
+    it("after three empty answers it keeps the last known metrics and records one 'unavailable' final row", async () => {
+      prisma.formatDeliverable.findMany.mockResolvedValue([finalCandidate({ viewCount: 4_200, likeCount: 280 })]);
+      instagramOAuth.getMediaInsightsForPost.mockResolvedValue(null);
+
+      await withFakeTimers(() => service.finalizeCampaignMetrics("camp-1"));
+
+      expect(instagramOAuth.getMediaInsightsForPost).toHaveBeenCalledTimes(3);
+      expect(prisma.formatDeliverable.update).not.toHaveBeenCalled();
+      expect(prisma.deliverableInsightSnapshot.create).toHaveBeenCalledTimes(1);
+      expect(prisma.deliverableInsightSnapshot.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          source: "instagram_insights_final",
+          status: "unavailable",
+          errorCode: "no_data",
+          viewCount: 4_200,
+          likeCount: 280,
+        }),
+      });
+    });
+
+    it("a second call for the same campaign while the first is still running does nothing", async () => {
+      let release!: () => void;
+      prisma.formatDeliverable.findMany.mockImplementationOnce(
+        () => new Promise((resolve) => { release = () => resolve([]); }),
+      );
+
+      const first = service.finalizeCampaignMetrics("camp-1");
+      await service.finalizeCampaignMetrics("camp-1");
+      expect(prisma.formatDeliverable.findMany).toHaveBeenCalledTimes(1);
+
+      release();
+      await first;
+    });
+
+    it("never throws, even when the lookup itself fails", async () => {
+      prisma.formatDeliverable.findMany.mockRejectedValue(new Error("db down"));
+
+      await expect(service.finalizeCampaignMetrics("camp-1")).resolves.toBeUndefined();
+    });
+
+    it("the hourly job also finalizes closed campaigns that never got a successful final fetch", async () => {
+      prisma.formatDeliverable.findMany
+        .mockResolvedValueOnce([]) // the live-views sweep: nothing active
+        .mockResolvedValueOnce([finalCandidate({ id: "d1" })]); // recovery
+      instagramOAuth.getMediaInsightsForPost.mockResolvedValue(fullInsights);
+      prisma.formatDeliverable.update.mockResolvedValue({
+        id: "d1", viewCount: 5_000, reach: 4_000, likeCount: 300, commentCount: 20, shareCount: 10,
+      });
+
+      await withFakeTimers(() => service.refreshActiveDeliverableViews());
+
+      expect(prisma.formatDeliverable.findMany).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            participation: { campaign: { status: CampaignStatus.closed } },
+          }),
+        }),
+      );
+      expect(prisma.deliverableInsightSnapshot.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({ source: "instagram_insights_final", status: "success" }),
+      });
+    });
+
+    it("recovery gives up on a deliverable after 24 failed final fetches", async () => {
+      prisma.formatDeliverable.findMany
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([
+          finalCandidate({ id: "d-tried-out", _count: { insightSnapshots: 24 } }),
+          finalCandidate({ id: "d-still-trying", _count: { insightSnapshots: 23 } }),
+        ]);
+      instagramOAuth.getMediaInsightsForPost.mockResolvedValue(fullInsights);
+      prisma.formatDeliverable.update.mockResolvedValue({
+        id: "d-still-trying", viewCount: 5_000, reach: 4_000, likeCount: 300, commentCount: 20, shareCount: 10,
+      });
+
+      await withFakeTimers(() => service.refreshActiveDeliverableViews());
+
+      expect(prisma.formatDeliverable.update).toHaveBeenCalledTimes(1);
+      expect(prisma.formatDeliverable.update).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { id: "d-still-trying" } }),
+      );
+    });
+
+    it("recovery never throws, even when its own lookup fails", async () => {
+      prisma.formatDeliverable.findMany
+        .mockResolvedValueOnce([])
+        .mockRejectedValueOnce(new Error("db down"));
+
+      await expect(withFakeTimers(() => service.refreshActiveDeliverableViews())).resolves.toBeUndefined();
     });
   });
 
