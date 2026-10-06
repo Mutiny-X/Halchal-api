@@ -21,6 +21,7 @@ import { ActivityLogService } from "../activity/activity-log.service";
 import { CampaignAccessService } from "../access/campaign-access.service";
 import { getCampaignPoolUsageMap } from "../common/campaign-pool";
 import { InAppNotificationService } from "../notifications/in-app-notification.service";
+import { ParticipationService } from "../participation/participation.service";
 import { PrismaService } from "../prisma/prisma.service";
 import { RealtimeService } from "../realtime/realtime.service";
 import {
@@ -40,6 +41,7 @@ export class CampaignsService {
     private readonly realtime: RealtimeService,
     private readonly activityLog: ActivityLogService,
     private readonly notifications: InAppNotificationService,
+    private readonly participation: ParticipationService,
   ) {}
 
   // Fire-and-forget on purpose — a brand/admin publishing a campaign
@@ -421,6 +423,13 @@ export class CampaignsService {
       this.notifyCreatorsOfNewCampaign(formatted);
     } else {
       this.realtime.emitCampaignUpdated(formatted);
+    }
+    // Closed by hand — capture the posts' final metrics now, in the
+    // background, same as when the budget pool closes a campaign.
+    if (nextStatus === CampaignStatus.closed && existing.status !== CampaignStatus.closed) {
+      this.participation.finalizeCampaignMetrics(campaignId).catch((err) => {
+        this.logger.warn(`Final metrics fetch could not start for campaign ${campaignId}: ${err}`);
+      });
     }
     return formatted;
   }

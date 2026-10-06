@@ -12,7 +12,14 @@ function makeNotifications() {
 }
 
 function makeService(prisma: ReturnType<typeof makePrisma> = makePrisma(), notifications: ReturnType<typeof makeNotifications> = makeNotifications()) {
-  return new CampaignsService(prisma as never, {} as never, {} as never, {} as never, notifications as never);
+  return new CampaignsService(
+    prisma as never,
+    {} as never,
+    {} as never,
+    {} as never,
+    notifications as never,
+    { finalizeCampaignMetrics: vi.fn().mockResolvedValue(undefined) } as never,
+  );
 }
 
 function baseCampaign(overrides: Partial<Parameters<CampaignsService["formatCampaign"]>[0]> = {}) {
@@ -146,5 +153,69 @@ describe("CampaignsService.notifyCreatorsOfNewCampaign", () => {
     const service = makeService(prisma, makeNotifications());
 
     expect(() => invoke(service, { id: "camp-1", title: "Summer Drop" })).not.toThrow();
+  });
+});
+
+describe("CampaignsService.update — closing a campaign by hand", () => {
+  function setup(existingStatus: CampaignStatus) {
+    const existing = baseCampaign({ status: existingStatus } as never);
+    const prisma = {
+      user: { findMany: vi.fn().mockResolvedValue([]) },
+      campaign: {
+        findUnique: vi.fn().mockResolvedValue(existing),
+        update: vi.fn().mockImplementation(async ({ data }: { data: { status?: CampaignStatus } }) => ({
+          ...existing,
+          status: data.status ?? existing.status,
+        })),
+      },
+    };
+    const campaignAccess = { assertCanAccessCampaign: vi.fn().mockResolvedValue(undefined) };
+    const realtime = { emitCampaignUpdated: vi.fn(), emitCampaignPublished: vi.fn() };
+    const participation = { finalizeCampaignMetrics: vi.fn().mockResolvedValue(undefined) };
+    const service = new CampaignsService(
+      prisma as never,
+      campaignAccess as never,
+      realtime as never,
+      {} as never,
+      makeNotifications() as never,
+      participation as never,
+    );
+    return { service, participation, prisma };
+  }
+
+  it("starts the end-of-campaign metrics fetch when a live campaign is closed", async () => {
+    const { service, participation } = setup(CampaignStatus.live);
+
+    await service.update("admin-1", UserRole.admin, "camp-1", { status: CampaignStatus.closed } as never);
+
+    expect(participation.finalizeCampaignMetrics).toHaveBeenCalledTimes(1);
+    expect(participation.finalizeCampaignMetrics).toHaveBeenCalledWith("camp-1");
+  });
+
+  it("also starts it when a paused campaign is closed", async () => {
+    const { service, participation } = setup(CampaignStatus.paused);
+
+    await service.update("admin-1", UserRole.admin, "camp-1", { status: CampaignStatus.closed } as never);
+
+    expect(participation.finalizeCampaignMetrics).toHaveBeenCalledWith("camp-1");
+  });
+
+  it("does not start it for other status changes, or for edits that leave the status alone", async () => {
+    const paused = setup(CampaignStatus.live);
+    await paused.service.update("admin-1", UserRole.admin, "camp-1", { status: CampaignStatus.paused } as never);
+    expect(paused.participation.finalizeCampaignMetrics).not.toHaveBeenCalled();
+
+    const edited = setup(CampaignStatus.live);
+    await edited.service.update("admin-1", UserRole.admin, "camp-1", { title: "New title" } as never);
+    expect(edited.participation.finalizeCampaignMetrics).not.toHaveBeenCalled();
+  });
+
+  it("closes the campaign even if the metrics fetch fails to start", async () => {
+    const { service, participation } = setup(CampaignStatus.live);
+    participation.finalizeCampaignMetrics.mockRejectedValue(new Error("boom"));
+
+    const result = await service.update("admin-1", UserRole.admin, "camp-1", { status: CampaignStatus.closed } as never);
+
+    expect(result.status).toBe(CampaignStatus.closed);
   });
 });
