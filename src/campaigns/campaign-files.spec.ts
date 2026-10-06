@@ -36,7 +36,10 @@ function campaignRow(overrides: Record<string, unknown> = {}) {
   };
 }
 
-function setup(row: Record<string, unknown>, opts: { usedElsewhere?: string[] } = {}) {
+function setup(
+  row: Record<string, unknown>,
+  opts: { usedElsewhere?: string[]; unpaid?: unknown[]; work?: unknown[] } = {},
+) {
   const prisma = {
     campaign: {
       findUnique: vi.fn().mockResolvedValue(row),
@@ -52,13 +55,26 @@ function setup(row: Record<string, unknown>, opts: { usedElsewhere?: string[] } 
       }),
     },
     brandProfile: { findUnique: vi.fn().mockResolvedValue({ id: "brand-1" }) },
+    formatDeliverable: {
+      // [unpaid approved check, creator work collection]
+      findMany: vi.fn(async ({ where }: { where: { status?: string } }) =>
+        where.status ? (opts.unpaid ?? []) : (opts.work ?? []),
+      ),
+      count: vi.fn().mockResolvedValue(0),
+    },
+    deliverableRejectionEvent: { count: vi.fn().mockResolvedValue(0) },
+    notification: { deleteMany: vi.fn().mockReturnValue("notif-delete") },
+    $transaction: vi.fn(async (ops: unknown[]) => ops),
   };
-  const storage = { deleteCampaignFile: vi.fn().mockResolvedValue(true) };
+  const storage = {
+    deleteCampaignFile: vi.fn().mockResolvedValue(true),
+    deleteCreatorWorkFile: vi.fn().mockResolvedValue(true),
+  };
   const service = new CampaignsService(
     prisma as never,
     new CampaignAccessService(prisma as never),
     { emitCampaignUpdated: vi.fn(), emitCampaignPublished: vi.fn(), emitCampaignCreated: vi.fn() } as never,
-    { log: vi.fn() } as never,
+    { log: vi.fn().mockResolvedValue(undefined) } as never,
     { create: vi.fn() } as never,
     { get: (k: string) => (k === "S3_PUBLIC_BASE_URL" ? R2 : undefined) } as never,
     storage as never,
@@ -100,11 +116,52 @@ describe("deleting a campaign removes its files from storage", () => {
     await expect(service.remove("u", UserRole.brand, "camp-1")).resolves.toMatchObject({ deleted: true });
   });
 
-  it("refuses to delete once creators have joined — their work and payouts would cascade away", async () => {
+  it("a BRAND can't delete a campaign creators joined (only an admin can)", async () => {
     const { service, prisma, storage } = setup(campaignRow({ status: CampaignStatus.closed, _count: { submissions: 0, participations: 2 } }));
-    await expect(service.remove("u", UserRole.brand, "camp-1")).rejects.toBeInstanceOf(BadRequestException);
+    await expect(service.remove("u", UserRole.brand, "camp-1")).rejects.toThrow(/only an admin can delete it/);
     expect(prisma.campaign.delete).not.toHaveBeenCalled();
     expect(storage.deleteCampaignFile).not.toHaveBeenCalled();
+  });
+
+  it("even an ADMIN can't delete while a creator still has approved work unpaid", async () => {
+    const { service, prisma, storage } = setup(
+      campaignRow({ status: CampaignStatus.closed, _count: { submissions: 0, participations: 2 } }),
+      { unpaid: [{ participation: { creatorId: "c1" } }, { participation: { creatorId: "c1" } }, { participation: { creatorId: "c2" } }] },
+    );
+    const err = await service.remove("admin", UserRole.admin, "camp-1").catch((e) => e);
+    expect(err).toBeInstanceOf(BadRequestException);
+    expect(err.getResponse()).toMatchObject({ code: "UNPAID_CREATOR_WORK" });
+    expect(err.getResponse().message).toMatch(/^2 creators still have approved work that hasn't been paid \(3 submissions\)/);
+    expect(prisma.campaign.delete).not.toHaveBeenCalled();
+    expect(storage.deleteCreatorWorkFile).not.toHaveBeenCalled();
+  });
+
+  it("an admin deleting a fully-paid campaign removes the creators' work: records, notifications and files", async () => {
+    const DRAFT = `${R2}/creator-drafts/5-eeeeeeeeeeeeeeee.mp4`;
+    const OLD_DRAFT = `${R2}/creator-drafts/4-ffffffffffffffff.mp4`;
+    const ADMIN_COPY = `${R2}/admin-draft-copies/6-1111111111111111.mp4`;
+    const { service, prisma, storage } = setup(
+      campaignRow({ status: CampaignStatus.closed, _count: { submissions: 0, participations: 1 } }),
+      {
+        work: [
+          {
+            participationId: "p1",
+            draftDriveUrl: DRAFT,
+            adminUploadedDraftUrl: ADMIN_COPY,
+            rejectionEvents: [{ draftDriveUrl: OLD_DRAFT }, { draftDriveUrl: "https://drive.google.com/x" }],
+          },
+        ],
+      },
+    );
+    await expect(service.remove("admin", UserRole.admin, "camp-1")).resolves.toEqual({ deleted: true, id: "camp-1" });
+    // Notifications pointing at the campaign or the creator's submission go, in the same transaction.
+    expect(prisma.notification.deleteMany).toHaveBeenCalledWith({
+      where: { OR: [{ link: "/campaigns/camp-1" }, { link: { in: ["/participations/p1"] } }] },
+    });
+    expect(prisma.$transaction).toHaveBeenCalled();
+    const work = storage.deleteCreatorWorkFile.mock.calls.map((c) => c[0]).sort();
+    expect(work).toEqual([ADMIN_COPY, DRAFT, OLD_DRAFT, "https://drive.google.com/x"].sort());
+    expect(storage.deleteCampaignFile).toHaveBeenCalled();
   });
 
   it("a failed delete (live campaign) touches no files", async () => {

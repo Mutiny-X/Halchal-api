@@ -12,6 +12,7 @@ import {
   CampaignOwnership,
   CampaignStatus,
   CampaignWizardStep,
+  FormatDeliverableStatus,
   NewClipperIntakeStatus,
   Prisma,
   SourceAssetRequirement,
@@ -59,6 +60,28 @@ export class CampaignsService {
    * in more than one) is kept. Storage errors are logged, never thrown — the
    * campaign change itself has already succeeded.
    */
+  /** Same as removeUnusedCampaignFiles, for creators' work files: kept if
+   * any remaining deliverable (or its review history) still points at it. */
+  private async removeUnusedCreatorWorkFiles(urls: string[], context: string): Promise<void> {
+    if (!this.storage || urls.length === 0) return;
+    for (const url of urls) {
+      try {
+        const [byDeliverable, byHistory] = await Promise.all([
+          this.prisma.formatDeliverable.count({
+            where: { OR: [{ draftDriveUrl: url }, { adminUploadedDraftUrl: url }] },
+          }),
+          this.prisma.deliverableRejectionEvent.count({ where: { draftDriveUrl: url } }),
+        ]);
+        if (byDeliverable + byHistory > 0) continue;
+        if (await this.storage.deleteCreatorWorkFile(url)) {
+          this.logger.log(`Deleted creator work file (${context}): ${url}`);
+        }
+      } catch (error) {
+        this.logger.warn(`Couldn't delete creator work file ${url} (${context}): ${error}`);
+      }
+    }
+  }
+
   private async removeUnusedCampaignFiles(urls: string[], context: string): Promise<void> {
     if (!this.storage || urls.length === 0) return;
     for (const url of urls) {
@@ -587,19 +610,83 @@ export class CampaignsService {
         message: "Cannot delete a campaign that has creator submissions",
       });
     }
-    // Participations and their deliverables cascade-delete with a campaign —
-    // that would silently erase creators' work and payout history. Once any
-    // creator has joined, the campaign can be closed but never deleted.
+    // Creators have worked on it: deleting also wipes their work, so only an
+    // admin may do it — and never while anyone is still owed money.
+    // Payments already made live in wallet history and are never deleted.
     if (existing._count.participations > 0) {
-      throw new BadRequestException({
-        code: "VALIDATION_ERROR",
-        message: "Creators have joined this campaign, so it can't be deleted. Close it instead to keep their work and payout history.",
+      if (role !== UserRole.admin) {
+        throw new ForbiddenException({
+          code: "FORBIDDEN",
+          message: "Creators have joined this campaign, so only an admin can delete it. You can close it instead.",
+        });
+      }
+      const unpaid = await this.prisma.formatDeliverable.findMany({
+        where: {
+          participation: { campaignId },
+          status: FormatDeliverableStatus.proof_approved,
+          paidAt: null,
+        },
+        select: { participation: { select: { creatorId: true } } },
       });
+      if (unpaid.length > 0) {
+        const creators = new Set(unpaid.map((d) => d.participation.creatorId)).size;
+        throw new BadRequestException({
+          code: "UNPAID_CREATOR_WORK",
+          message:
+            `${creators} creator${creators === 1 ? "" : "s"} still ${creators === 1 ? "has" : "have"} approved work that hasn't been paid ` +
+            `(${unpaid.length} submission${unpaid.length === 1 ? "" : "s"}). Pay them from the campaign's Payouts before deleting it.`,
+        });
+      }
     }
 
-    await this.prisma.campaign.delete({ where: { id: campaignId } });
-    // Then everything it stored: cover, sample content, uploaded source files.
+    // Gather every creator file BEFORE the cascade removes the rows that
+    // point at them: uploaded drafts, admin copies, and older rejected drafts.
+    const work = await this.prisma.formatDeliverable.findMany({
+      where: { participation: { campaignId } },
+      select: {
+        draftDriveUrl: true,
+        adminUploadedDraftUrl: true,
+        participationId: true,
+        rejectionEvents: { select: { draftDriveUrl: true } },
+      },
+    });
+    const workFileUrls = [
+      ...new Set(
+        work
+          .flatMap((d) => [d.draftDriveUrl, d.adminUploadedDraftUrl, ...d.rejectionEvents.map((e) => e.draftDriveUrl)])
+          .filter((u): u is string => Boolean(u?.trim()))
+          .map((u) => u.trim()),
+      ),
+    ];
+    const participationIds = [...new Set(work.map((d) => d.participationId))];
+
+    // One transaction: notifications that would now lead nowhere, then the
+    // campaign — which cascades to invites, participations, deliverables,
+    // review history, auto-review results and marketplace reposts.
+    await this.prisma.$transaction([
+      this.prisma.notification.deleteMany({
+        where: {
+          OR: [
+            { link: `/campaigns/${campaignId}` },
+            ...(participationIds.length ? [{ link: { in: participationIds.map((id) => `/participations/${id}`) } }] : []),
+          ],
+        },
+      }),
+      this.prisma.campaign.delete({ where: { id: campaignId } }),
+    ]);
+
+    await this.activityLog
+      .log(userId, "campaign.deleted", {
+        targetType: "Campaign",
+        targetId: campaignId,
+        brandProfileId: existing.brandProfileId ?? undefined,
+        metadata: { title: existing.title, participations: existing._count.participations, creatorFiles: workFileUrls.length },
+      })
+      .catch(() => undefined);
+
+    // Then the files: the campaign's own, and the creators' work.
     await this.removeUnusedCampaignFiles(campaignFileUrls(existing), `campaign ${campaignId} deleted`);
+    await this.removeUnusedCreatorWorkFiles(workFileUrls, `campaign ${campaignId} deleted`);
     return { deleted: true, id: campaignId };
   }
 

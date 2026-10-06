@@ -275,28 +275,55 @@ export class ObjectStorageService {
   }
 
   /**
-   * Deletes one campaign file given the URL stored on a campaign. Only keys
-   * in the campaign folders are ever touched — a URL pointing anywhere else
-   * (another folder such as avatars or KYC documents, another host, a Drive
-   * link) is ignored and returns false. Missing files count as deleted.
+   * Deletes one stored file given the URL saved in the database, but only if
+   * it lives in one of `folders` (e.g. a campaign's own folders). A URL that
+   * points anywhere else — another folder such as avatars or KYC documents,
+   * another host, a Drive/Instagram link — is ignored and returns false.
+   * A file that's already gone counts as deleted.
    */
-  async deleteCampaignFile(url: string): Promise<boolean> {
+  async deleteStoredFile(url: string, folders: readonly string[]): Promise<boolean> {
     const value = url.trim();
-    const local = LOCAL_CAMPAIGN_FILE.exec(value);
+    const allowed = (folder: string, name: string) =>
+      folders.includes(folder) && FILE_NAME.test(name);
+
+    // Local-disk storage: "/uploads/<folder>/<file>", or the same path on
+    // this API's own host (some routes saved absolute URLs).
+    let localPath = value;
+    if (!value.startsWith("/")) {
+      try {
+        localPath = this.isR2Configured() ? "" : new URL(value).pathname;
+      } catch {
+        localPath = "";
+      }
+    }
+    const local = /^\/uploads\/([a-z0-9-]+)\/([^/]+)$/.exec(localPath);
     if (local) {
+      if (!allowed(local[1], local[2])) return false;
       await unlink(join(process.cwd(), "uploads", local[1], local[2])).catch((error: NodeJS.ErrnoException) => {
         if (error.code !== "ENOENT") throw error;
       });
       return true;
     }
+
     if (!this.isR2Configured()) return false;
     const base = (this.config.get("S3_PUBLIC_BASE_URL", { infer: true }) ?? "").replace(/\/$/, "");
-    if (!base) return false;
-    if (!value.startsWith(`${base}/`)) return false;
+    if (!base || !value.startsWith(`${base}/`)) return false;
     const key = decodeURIComponent(value.slice(base.length + 1).split(/[?#]/)[0]);
-    if (!CAMPAIGN_FILE_KEY.test(key)) return false;
+    const [folder, name, ...rest] = key.split("/");
+    if (rest.length || !folder || !name || !allowed(folder, name)) return false;
     await this.deleteObject(key);
     return true;
+  }
+
+  /** A campaign's own files: cover, sample content, uploaded source files. */
+  deleteCampaignFile(url: string): Promise<boolean> {
+    return this.deleteStoredFile(url, CAMPAIGN_FILE_FOLDERS);
+  }
+
+  /** Creators' work on a campaign: drafts uploaded from the app and admin
+   * copies of drafts. */
+  deleteCreatorWorkFile(url: string): Promise<boolean> {
+    return this.deleteStoredFile(url, CREATOR_WORK_FOLDERS);
   }
 
   publicUrlFor(key: string): string {
@@ -345,9 +372,11 @@ export class ObjectStorageService {
   }
 }
 
-/** Campaign files: covers, sample content and uploaded source files. */
-const CAMPAIGN_FILE_KEY = /^(cover-images|reference-assets)\/[A-Za-z0-9_-][A-Za-z0-9._-]*$/;
-const LOCAL_CAMPAIGN_FILE = /^\/uploads\/(cover-images|reference-assets)\/([A-Za-z0-9_-][A-Za-z0-9._-]*)$/;
+/** Folders cleanup may ever delete from — never avatars, logos or KYC. */
+export const CAMPAIGN_FILE_FOLDERS = ["cover-images", "reference-assets"] as const;
+export const CREATOR_WORK_FOLDERS = ["creator-drafts", "admin-draft-copies"] as const;
+/** A stored file name: no leading dot (no "..", no hidden files). */
+const FILE_NAME = /^[A-Za-z0-9_-][A-Za-z0-9._-]*$/;
 
 export function buildR2UploadResponse(
   publicBaseUrl: string,

@@ -1,5 +1,5 @@
 import { BadRequestException } from "@nestjs/common";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { ObjectStorageService } from "./object-storage.service";
 
@@ -40,4 +40,43 @@ describe("ObjectStorageService.presignUpload", () => {
       );
     },
   );
+});
+
+describe("ObjectStorageService.deleteStoredFile — only ever deletes from allowed folders", () => {
+  const make = () => {
+    const storage = new ObjectStorageService(config as never);
+    const deleteObject = vi.spyOn(storage, "deleteObject").mockResolvedValue(undefined);
+    return { storage, deleteObject };
+  };
+
+  it("deletes a creator draft and an admin copy (creator work folders)", async () => {
+    const { storage, deleteObject } = make();
+    expect(await storage.deleteCreatorWorkFile("https://pub.example.com/creator-drafts/1-abc.mp4")).toBe(true);
+    expect(await storage.deleteCreatorWorkFile("https://pub.example.com/admin-draft-copies/2-def.mp4")).toBe(true);
+    expect(deleteObject.mock.calls.map((c) => c[0])).toEqual(["creator-drafts/1-abc.mp4", "admin-draft-copies/2-def.mp4"]);
+  });
+
+  it.each([
+    ["a KYC document", "https://pub.example.com/kyc-documents/1-a.png"],
+    ["an Aadhaar document", "https://pub.example.com/aadhaar-documents/1-a.png"],
+    ["a profile photo", "https://pub.example.com/avatars/1-a.png"],
+    ["a campaign cover (wrong group)", "https://pub.example.com/cover-images/1-a.png"],
+    ["a nested key", "https://pub.example.com/creator-drafts/x/1-a.mp4"],
+    ["a dot-file / traversal", "https://pub.example.com/creator-drafts/..%2F..%2Fkyc"],
+    ["another host", "https://evil.example.com/creator-drafts/1-a.mp4"],
+    ["a Drive link", "https://drive.google.com/file/d/x/view"],
+    ["an Instagram post", "https://www.instagram.com/reel/abc/"],
+  ])("never deletes %s via creator-work cleanup", async (_label, url) => {
+    const { storage, deleteObject } = make();
+    expect(await storage.deleteCreatorWorkFile(url)).toBe(false);
+    expect(deleteObject).not.toHaveBeenCalled();
+  });
+
+  it("campaign cleanup can't reach creator work, KYC or avatars either", async () => {
+    const { storage, deleteObject } = make();
+    for (const url of ["https://pub.example.com/creator-drafts/1-a.mp4", "https://pub.example.com/pan-documents/1-a.png"]) {
+      expect(await storage.deleteCampaignFile(url)).toBe(false);
+    }
+    expect(deleteObject).not.toHaveBeenCalled();
+  });
 });
