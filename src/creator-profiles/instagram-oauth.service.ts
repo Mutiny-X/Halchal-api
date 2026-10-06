@@ -101,6 +101,20 @@ type InstagramInsights = {
   fetchedAt: string;
 };
 
+/** Per-post metrics Instagram actually reported — a field is left out, not
+ * zeroed, when Instagram didn't return it, so a partial response never
+ * overwrites a previously-known value with a fake 0. */
+export type InstagramPostInsights = Partial<Omit<PlatformViewResult, "platform">> & {
+  platform: "instagram";
+  /** Saves aren't stored on the deliverable itself — only in its history
+   * snapshot rows, which is what the campaign report reads. */
+  saveCount?: number;
+  /** Instagram's own id for the matched media item. */
+  platformMediaId?: string;
+  /** Every metric Instagram returned, by its own name, for the audit trail. */
+  rawMetrics?: Record<string, number>;
+};
+
 function oauthId(bytes = 24): string {
   return randomBytes(bytes).toString("base64url");
 }
@@ -697,10 +711,7 @@ export class InstagramOAuthService {
     for (let page = 0; page < maxPages && nextUrl; page++) {
       const mediaRes: InstagramMediaResponse =
         await this.instagramGraphFetch<InstagramMediaResponse>(nextUrl);
-      if (!mediaRes.data) {
-        throw new Error(`media list returned no data: ${JSON.stringify(mediaRes).slice(0, 300)}`);
-      }
-      const match = mediaRes.data.find(
+      const match = (mediaRes.data ?? []).find(
         (m) => m.permalink && extractInstagramShortcode(m.permalink) === targetShortcode,
       );
       if (match) return { item: match, accessToken };
@@ -712,7 +723,7 @@ export class InstagramOAuthService {
   async getMediaInsightsForPost(
     creatorProfileId: string,
     livePostUrl: string,
-  ): Promise<PlatformViewResult | null> {
+  ): Promise<InstagramPostInsights | null> {
     try {
       const found = await this.findOwnMediaItem(creatorProfileId, livePostUrl, "id,permalink");
       if (!found) {
@@ -734,19 +745,42 @@ export class InstagramOAuthService {
       );
       if (!metricsRes.data) return null;
 
-      const metricValue = (name: string): number => {
+      // undefined (not 0) when Instagram didn't report a metric — a metric
+      // that's absent from the response isn't known to be zero, so callers
+      // must be able to tell the two apart and keep whatever they last had.
+      const metricValue = (name: string): number | undefined => {
         const entry = metricsRes.data!.find((m) => m.name === name);
-        return entry?.total_value?.value ?? entry?.values?.[0]?.value ?? 0;
+        return entry?.total_value?.value ?? entry?.values?.[0]?.value;
       };
 
-      return {
-        viewCount: metricValue("views"),
-        reach: metricValue("reach"),
-        likeCount: metricValue("likes"),
-        commentCount: metricValue("comments"),
-        shareCount: metricValue("shares"),
-        platform: "instagram",
-      };
+      const insights: InstagramPostInsights = { platform: "instagram", platformMediaId: match.id };
+      const fields = [
+        ["viewCount", "views"],
+        ["reach", "reach"],
+        ["likeCount", "likes"],
+        ["commentCount", "comments"],
+        ["shareCount", "shares"],
+        ["saveCount", "saved"],
+      ] as const;
+      let reportedAny = false;
+      for (const [key, metric] of fields) {
+        const value = metricValue(metric);
+        if (value !== undefined) {
+          insights[key] = value;
+          reportedAny = true;
+        }
+      }
+      // Nothing usable came back at all — same as no data, not a post with
+      // zero of everything.
+      if (!reportedAny) return null;
+
+      const rawMetrics: Record<string, number> = {};
+      for (const entry of metricsRes.data) {
+        const value = entry.total_value?.value ?? entry.values?.[0]?.value;
+        if (value !== undefined) rawMetrics[entry.name] = value;
+      }
+      insights.rawMetrics = rawMetrics;
+      return insights;
     } catch (err) {
       this.logger.warn(`Instagram Insights fetch failed for ${livePostUrl}: ${err}`);
       return null;

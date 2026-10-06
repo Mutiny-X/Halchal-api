@@ -26,6 +26,7 @@ import { CampaignAccessService } from "../access/campaign-access.service";
 import { getCampaignPoolUsageMap } from "../common/campaign-pool";
 import { UserRateLimiter } from "../common/user-rate-limit";
 import { InAppNotificationService } from "../notifications/in-app-notification.service";
+import { ParticipationService } from "../participation/participation.service";
 import { PrismaService } from "../prisma/prisma.service";
 import { RealtimeService } from "../realtime/realtime.service";
 import {
@@ -51,6 +52,7 @@ export class CampaignsService {
     private readonly realtime: RealtimeService,
     private readonly activityLog: ActivityLogService,
     private readonly notifications: InAppNotificationService,
+    private readonly participation: ParticipationService,
     @Optional() private readonly config?: ConfigService<Env, true>,
     @Optional() private readonly storage?: ObjectStorageService,
   ) {}
@@ -624,6 +626,13 @@ export class CampaignsService {
       }
     } else {
       this.realtime.emitCampaignUpdated(formatted);
+    }
+    // Closed by hand — capture the posts' final metrics now, in the
+    // background, same as when the budget pool closes a campaign.
+    if (nextStatus === CampaignStatus.closed && existing.status !== CampaignStatus.closed) {
+      this.participation.finalizeCampaignMetrics(campaignId).catch((err) => {
+        this.logger.warn(`Final metrics fetch could not start for campaign ${campaignId}: ${err}`);
+      });
     }
     if (isSubmission) {
       await this.notifications.notifyAllAdmins({

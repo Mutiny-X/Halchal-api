@@ -76,6 +76,7 @@ function setup(
     { emitCampaignUpdated: vi.fn(), emitCampaignPublished: vi.fn(), emitCampaignCreated: vi.fn() } as never,
     { log: vi.fn().mockResolvedValue(undefined) } as never,
     { create: vi.fn() } as never,
+    { finalizeCampaignMetrics: vi.fn().mockResolvedValue(undefined) } as never,
     { get: (k: string) => (k === "S3_PUBLIC_BASE_URL" ? R2 : undefined) } as never,
     storage as never,
   );

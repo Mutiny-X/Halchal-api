@@ -76,6 +76,7 @@ function setup(existing: Record<string, unknown>) {
     realtime as never,
     activityLog as never,
     notifications as never,
+    { finalizeCampaignMetrics: vi.fn().mockResolvedValue(undefined) } as never,
   );
   return { prisma, service, realtime, activityLog, notifications };
 }

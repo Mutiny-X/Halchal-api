@@ -72,6 +72,7 @@ function setup() {
     realtime as never,
     activityLog as never,
     notifications as never,
+    { finalizeCampaignMetrics: vi.fn().mockResolvedValue(undefined) } as never,
   );
   // update() echoes what was written, like Prisma does.
   prisma.campaign.update.mockImplementation(async ({ data }: { data: Record<string, unknown> }) => ({

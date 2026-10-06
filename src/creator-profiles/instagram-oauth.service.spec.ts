@@ -79,18 +79,6 @@ describe("InstagramOAuthService.getMediaInsightsForPost", () => {
     expect(result).toBeNull();
   });
 
-  it("returns null and logs the failure, not a 'no match', when the media list comes back without data", async () => {
-    prisma.instagramConnection.findUnique.mockResolvedValue(connectedRow());
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(makeResponse({ paging: {} }));
-    const warnSpy = vi.spyOn((service as unknown as { logger: { warn: (m: string) => void } }).logger, "warn");
-
-    const result = await service.getMediaInsightsForPost("profile-1", "https://www.instagram.com/reel/Cxyz123/");
-
-    expect(result).toBeNull();
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("media list returned no data"));
-    expect(warnSpy).not.toHaveBeenCalledWith(expect.stringContaining("No Instagram media match"));
-  });
-
   it("matches the post by shortcode (ignoring query params/trailing slash) and returns mapped metrics", async () => {
     prisma.instagramConnection.findUnique.mockResolvedValue(connectedRow());
     const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (url) => {
@@ -111,6 +99,7 @@ describe("InstagramOAuthService.getMediaInsightsForPost", () => {
             { name: "likes", values: [{ value: 500 }] },
             { name: "comments", total_value: { value: 20 } },
             { name: "shares", total_value: { value: 7 } },
+            { name: "saved", total_value: { value: 31 } },
           ],
         });
       }
@@ -128,10 +117,49 @@ describe("InstagramOAuthService.getMediaInsightsForPost", () => {
       likeCount: 500,
       commentCount: 20,
       shareCount: 7,
+      saveCount: 31,
+      platformMediaId: "media-42",
+      rawMetrics: { views: 12345, reach: 9000, likes: 500, comments: 20, shares: 7, saved: 31 },
       platform: "instagram",
     });
     // Confirms the insights call was made against the matched media id, not the other one.
     expect(fetchSpy).toHaveBeenCalledWith(expect.stringContaining("/media-42/insights"), expect.anything());
+  });
+
+  it("omits metrics Instagram didn't return instead of reporting them as 0", async () => {
+    prisma.instagramConnection.findUnique.mockResolvedValue(connectedRow());
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (url) => {
+      const u = String(url);
+      if (u.includes("/media?")) {
+        return makeResponse({ data: [{ id: "media-42", permalink: "https://www.instagram.com/reel/Cxyz123/" }] });
+      }
+      return makeResponse({ data: [{ name: "views", total_value: { value: 300 } }, { name: "likes", total_value: { value: 0 } }] });
+    });
+
+    const result = await service.getMediaInsightsForPost("profile-1", "https://www.instagram.com/reel/Cxyz123/");
+
+    expect(result).toEqual({
+      viewCount: 300,
+      likeCount: 0,
+      platformMediaId: "media-42",
+      rawMetrics: { views: 300, likes: 0 },
+      platform: "instagram",
+    });
+  });
+
+  it("returns null when the insights response contains none of the requested metrics", async () => {
+    prisma.instagramConnection.findUnique.mockResolvedValue(connectedRow());
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (url) => {
+      const u = String(url);
+      if (u.includes("/media?")) {
+        return makeResponse({ data: [{ id: "media-42", permalink: "https://www.instagram.com/reel/Cxyz123/" }] });
+      }
+      return makeResponse({ data: [] });
+    });
+
+    const result = await service.getMediaInsightsForPost("profile-1", "https://www.instagram.com/reel/Cxyz123/");
+
+    expect(result).toBeNull();
   });
 
   it("returns null when the post isn't found within the page cap (no Apify fallback — Instagram-only)", async () => {

@@ -18,11 +18,14 @@ import { ActivityLogService } from "../activity/activity-log.service";
 import { AutoReviewService, MAX_STUCK_RETRIES } from "../auto-review/auto-review.service";
 import { CampaignAccessService } from "../access/campaign-access.service";
 import { normalizeCampaignPlatforms } from "../campaigns/campaign-platforms";
-import { ApifyService, type PlatformViewResult } from "../common/apify.service";
+import { ApifyService } from "../common/apify.service";
 import { getCampaignPoolUsage } from "../common/campaign-pool";
 import { computeEstimatedPaise } from "../common/earnings";
 import { CreatorProfilesService } from "../creator-profiles/creator-profiles.service";
-import { InstagramOAuthService } from "../creator-profiles/instagram-oauth.service";
+import {
+  InstagramOAuthService,
+  type InstagramPostInsights,
+} from "../creator-profiles/instagram-oauth.service";
 import { InAppNotificationService } from "../notifications/in-app-notification.service";
 import { PrismaService } from "../prisma/prisma.service";
 import { RealtimeService } from "../realtime/realtime.service";
@@ -51,6 +54,34 @@ function formatPlatform(platform: string): string {
   };
   return labels[platform] ?? platform.replace(/_/g, " ");
 }
+
+/** What triggered a metrics refresh — see _persistDeliverableMetrics. */
+export type MetricsRefreshKind = "hourly" | "daily" | "manual" | "final";
+
+/** Value of DeliverableInsightSnapshot.source per refresh kind. The report
+ * tells the rows apart by this: hourly rows only vouch for viewCount, daily
+ * and manual rows for every metric, and the final row is the end-of-campaign
+ * figure. */
+export const SNAPSHOT_SOURCE: Record<MetricsRefreshKind, string> = {
+  hourly: "instagram_insights_hourly",
+  daily: "instagram_insights_daily",
+  manual: "instagram_insights_manual",
+  final: "instagram_insights_final",
+};
+
+/** Waits between the attempts of one final fetch — 3 attempts in total. */
+const FINAL_FETCH_RETRY_DELAYS_MS = [5_000, 30_000];
+
+/** The hourly recovery check keeps retrying a campaign's failed final fetch
+ * once an hour, up to this many failed final rows per deliverable (about a
+ * day), then gives up and leaves the "unavailable" marker for the report. */
+const MAX_FINAL_FETCH_FAILURES = 24;
+
+const TRACKABLE_STATUSES: FormatDeliverableStatus[] = [
+  FormatDeliverableStatus.live_submitted,
+  FormatDeliverableStatus.proof_under_review,
+  FormatDeliverableStatus.proof_approved,
+];
 
 const rejectionEventsInclude = {
   orderBy: { rejectedAt: "desc" as const },
@@ -302,16 +333,16 @@ export class ParticipationService {
     // attempt so the gate can't go stale.
     const poolState = await this._evaluateCampaignPoolThresholds(campaign);
     const intakeStatus = poolState.newClipperIntakeStatus;
-    if (intakeStatus !== campaign.newClipperIntakeStatus || poolState.paused) {
+    if (intakeStatus !== campaign.newClipperIntakeStatus || poolState.closed) {
       this.realtime.emitCampaignUpdated({
         id: campaign.id,
         brandProfileId: campaign.brandProfileId,
-        ...(poolState.paused ? { status: CampaignStatus.paused } : {}),
+        ...(poolState.closed ? { status: CampaignStatus.closed } : {}),
         newClipperIntakeStatus: intakeStatus,
         poolUtilizationBps: poolState.utilizationBps,
       });
     }
-    if (poolState.paused) {
+    if (poolState.closed) {
       throw new NotFoundException({
         code: "NOT_FOUND",
         message: "Campaign not available",
@@ -1445,6 +1476,13 @@ export class ParticipationService {
     deliverable: Prisma.FormatDeliverableGetPayload<{
       include: { participation: { include: { campaign: true } } };
     }>,
+    // What triggered this refresh. "hourly": only the view count is written.
+    // "daily" / "manual" / "final": every metric is written. All of them
+    // append one history row, tagged with the kind (see SNAPSHOT_SOURCE) so
+    // the report knows which columns of that row are fresh — an hourly
+    // row's view count is real, its other counts are carried over. "final"
+    // is the end-of-campaign fetch and retries the Instagram call.
+    kind: MetricsRefreshKind = "manual",
   ) {
     const deliverableId = deliverable.id;
     const livePostUrl = deliverable.livePostUrl!;
@@ -1455,41 +1493,79 @@ export class ParticipationService {
     // getMediaInsightsForPost); otherwise it's "unavailable", not a
     // silently-substituted scrape. YouTube/Twitter have no Insights
     // equivalent in this codebase and stay on Apify exclusively.
-    let metrics: PlatformViewResult;
+    // Only the metrics a source actually reported get written. An Instagram
+    // fetch that returns nothing (no connection, post not found, permission
+    // or network failure) or only some metrics must leave the last known
+    // values alone — zero is only ever written when Instagram itself says 0.
+    let metrics: Pick<
+      Prisma.FormatDeliverableUpdateInput,
+      "viewCount" | "reach" | "likeCount" | "commentCount" | "shareCount"
+    >;
     let metricsSource: "instagram_insights" | "apify" | "unavailable";
-    if (deliverable.platform.startsWith("instagram")) {
-      const insights = await this.instagramOAuth.getMediaInsightsForPost(
+    const isInstagram = deliverable.platform.startsWith("instagram");
+    // Instagram only — the history rows feed the campaign report, and the
+    // Apify path can't tell a real zero from a failed scrape.
+    let snapshotExtras: Pick<InstagramPostInsights, "saveCount" | "platformMediaId" | "rawMetrics"> = {};
+    let allMetricsReported = false;
+    if (isInstagram) {
+      const insights = await this._fetchInstagramInsights(
         deliverable.participation.creatorProfileId,
         livePostUrl,
+        kind === "final" ? FINAL_FETCH_RETRY_DELAYS_MS : [],
       );
       if (insights) {
-        metrics = insights;
+        const { platform: _platform, saveCount, platformMediaId, rawMetrics, ...reported } = insights;
+        metrics = reported;
+        snapshotExtras = { saveCount, platformMediaId, rawMetrics };
+        allMetricsReported = saveCount !== undefined && Object.keys(reported).length === 5;
         metricsSource = "instagram_insights";
       } else {
-        metrics = { viewCount: 0, reach: 0, likeCount: 0, commentCount: 0, shareCount: 0, platform: "instagram" };
+        metrics = {};
         metricsSource = "unavailable";
       }
     } else {
-      metrics = await this.apify.getViewCount(livePostUrl);
+      const { platform: _platform, ...scraped } = await this.apify.getViewCount(livePostUrl);
+      metrics = scraped;
       metricsSource = "apify";
     }
     this.logger.log(`refreshDeliverableViews: ${deliverableId} metrics source = ${metricsSource}`);
 
-    // A failed refresh must not overwrite the last good numbers with zeros.
-    if (metricsSource === "unavailable") {
+    if (kind === "hourly") {
+      metrics = metrics.viewCount !== undefined ? { viewCount: metrics.viewCount } : {};
+      // The hourly row only vouches for the view count.
+      snapshotExtras = {
+        platformMediaId: snapshotExtras.platformMediaId,
+        rawMetrics: metrics.viewCount !== undefined ? { views: metrics.viewCount as number } : {},
+      };
+    }
+    const source = SNAPSHOT_SOURCE[kind];
+
+    if (Object.keys(metrics).length === 0) {
+      this.logger.warn(
+        `refreshDeliverableViews: ${deliverableId} no metrics returned — keeping last known values`,
+      );
+      if (isInstagram) {
+        await this._recordInsightSnapshot(deliverable, deliverable, {
+          status: "unavailable",
+          errorCode: "no_data",
+          source,
+        });
+      }
       return { updated: deliverable, metricsSource };
     }
 
     const updated = await this.prisma.formatDeliverable.update({
       where: { id: deliverableId },
-      data: {
-        viewCount:    metrics.viewCount,
-        reach:        metrics.reach,
-        likeCount:    metrics.likeCount,
-        commentCount: metrics.commentCount,
-        shareCount:   metrics.shareCount,
-      },
+      data: metrics,
     });
+
+    if (isInstagram) {
+      await this._recordInsightSnapshot(deliverable, updated, {
+        status: kind === "hourly" || allMetricsReported ? "success" : "partial",
+        source,
+        ...snapshotExtras,
+      });
+    }
 
     this.realtime.emitDeliverableMetricsUpdated({
       deliverableId,
@@ -1507,6 +1583,177 @@ export class ParticipationService {
     });
 
     return { updated, metricsSource };
+  }
+
+  /** One Instagram Insights lookup, retried after each wait in `retryDelaysMs`
+   * while it keeps coming back empty. A lookup that returns nothing is the
+   * normal "can't tell" answer for every failure (no connection, post not
+   * found, permission, network, rate limit), so empty is the only signal to
+   * retry on. */
+  private async _fetchInstagramInsights(
+    creatorProfileId: string,
+    livePostUrl: string,
+    retryDelaysMs: number[],
+  ): Promise<InstagramPostInsights | null> {
+    let insights = await this.instagramOAuth.getMediaInsightsForPost(creatorProfileId, livePostUrl);
+    for (const delay of retryDelaysMs) {
+      if (insights) break;
+      await new Promise((resolve) => setTimeout(resolve, delay));
+      insights = await this.instagramOAuth.getMediaInsightsForPost(creatorProfileId, livePostUrl);
+    }
+    return insights;
+  }
+
+  // Campaigns whose final fetch is running in this process right now, so the
+  // closure hook and the hourly recovery check can't both run it at once.
+  private readonly finalizing = new Set<string>();
+  private recoveryRunning = false;
+
+  /** Deliverables that still need their end-of-campaign fetch: Instagram,
+   * tracked, with a live link, and without a successful ("success" or
+   * "partial") final history row yet. */
+  private _finalFetchCandidates(
+    participation: Prisma.CampaignParticipationWhereInput,
+    take?: number,
+  ) {
+    return this.prisma.formatDeliverable.findMany({
+      where: {
+        status: { in: TRACKABLE_STATUSES },
+        livePostUrl: { not: null },
+        platform: { startsWith: "instagram" },
+        participation,
+        insightSnapshots: {
+          none: { source: SNAPSHOT_SOURCE.final, status: { in: ["success", "partial"] } },
+        },
+      },
+      include: {
+        participation: { include: { campaign: true } },
+        _count: {
+          select: { insightSnapshots: { where: { source: SNAPSHOT_SOURCE.final } } },
+        },
+      },
+      orderBy: { updatedAt: "asc" },
+      ...(take ? { take } : {}),
+    });
+  }
+
+  /** The end-of-campaign fetch: one full metrics refresh (retried — see
+   * FINAL_FETCH_RETRY_DELAYS_MS) for each of this campaign's Instagram
+   * deliverables, each ending in one history row tagged "final". Called when
+   * a campaign closes, from any path; it never touches the campaign's own
+   * state, and never throws. A deliverable that already has a successful
+   * final row is skipped, so calling it twice is harmless. A deliverable
+   * whose fetch fails gets an "unavailable" final row and is retried by the
+   * hourly recovery check. */
+  async finalizeCampaignMetrics(campaignId: string): Promise<void> {
+    if (this.finalizing.has(campaignId)) return;
+    this.finalizing.add(campaignId);
+    try {
+      const deliverables = await this._finalFetchCandidates({ campaignId });
+      await this._finalizeDeliverables(`campaign ${campaignId}`, deliverables);
+    } catch (err) {
+      this.logger.warn(`finalizeCampaignMetrics: campaign ${campaignId} aborted — ${err}`);
+    } finally {
+      this.finalizing.delete(campaignId);
+    }
+  }
+
+  private async _finalizeDeliverables(
+    label: string,
+    deliverables: Array<Prisma.FormatDeliverableGetPayload<{
+      include: { participation: { include: { campaign: true } } };
+    }>>,
+  ): Promise<void> {
+    if (deliverables.length === 0) return;
+    this.logger.log(`finalizeCampaignMetrics: ${label} — ${deliverables.length} deliverable(s)`);
+    for (const deliverable of deliverables) {
+      try {
+        const { metricsSource } = await this._persistDeliverableMetrics(deliverable, "final");
+        if (metricsSource === "unavailable") {
+          this.logger.warn(`finalizeCampaignMetrics: no data for deliverable ${deliverable.id} — will retry`);
+        }
+      } catch (err) {
+        this.logger.warn(`finalizeCampaignMetrics: failed for deliverable ${deliverable.id}: ${err}`);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+  }
+
+  /** Safety net for the closure hook: finds closed campaigns with Instagram
+   * deliverables that never got a successful final fetch — the process
+   * restarted right after closing, the closure came from a path that has no
+   * hook, or Instagram was down for every attempt — and runs it for them.
+   * Failed finals are retried once an hour, up to MAX_FINAL_FETCH_FAILURES. */
+  private async _recoverClosedCampaignFinals(): Promise<void> {
+    if (this.recoveryRunning) return;
+    this.recoveryRunning = true;
+    try {
+      const candidates = await this._finalFetchCandidates(
+        { campaign: { status: CampaignStatus.closed } },
+        200,
+      );
+      const due = candidates.filter(
+        (d) =>
+          d._count.insightSnapshots < MAX_FINAL_FETCH_FAILURES &&
+          !this.finalizing.has(d.participation.campaignId),
+      );
+      await this._finalizeDeliverables("recovery", due);
+    } catch (err) {
+      this.logger.warn(`_recoverClosedCampaignFinals: aborted — ${err}`);
+    } finally {
+      this.recoveryRunning = false;
+    }
+  }
+
+  /** Appends one history row to DeliverableInsightSnapshot for this refresh
+   * — never updates an earlier one, so the report can read a real
+   * day-by-day series. The count columns carry the deliverable's values as
+   * of this refresh (a metric Instagram didn't report keeps its last known
+   * value there, and saveCount is 0 when never reported); `status` says
+   * whether the numbers are fresh ("success"), partly fresh ("partial") or
+   * carried over unchanged ("unavailable"), and `rawMetrics` holds exactly
+   * what Instagram returned. A failed history write is logged and swallowed
+   * — it must never undo or block the metrics update itself. */
+  private async _recordInsightSnapshot(
+    deliverable: { id: string; platform: string; livePostUrl: string | null },
+    values: {
+      viewCount: number;
+      reach: number;
+      likeCount: number;
+      commentCount: number;
+      shareCount: number;
+    },
+    result: {
+      status: "success" | "partial" | "unavailable";
+      source: string;
+      errorCode?: string;
+      saveCount?: number;
+      platformMediaId?: string;
+      rawMetrics?: Record<string, number>;
+    },
+  ): Promise<void> {
+    try {
+      await this.prisma.deliverableInsightSnapshot.create({
+        data: {
+          deliverableId: deliverable.id,
+          platform: deliverable.platform,
+          livePostUrl: deliverable.livePostUrl!,
+          platformMediaId: result.platformMediaId ?? null,
+          viewCount: values.viewCount,
+          reach: values.reach,
+          likeCount: values.likeCount,
+          commentCount: values.commentCount,
+          shareCount: values.shareCount,
+          saveCount: result.saveCount ?? 0,
+          source: result.source,
+          status: result.status,
+          errorCode: result.errorCode ?? null,
+          rawMetrics: (result.rawMetrics ?? {}) as Prisma.InputJsonValue,
+        },
+      });
+    } catch (err) {
+      this.logger.warn(`Insight snapshot write failed for deliverable ${deliverable.id}: ${err}`);
+    }
   }
 
   /** Runs the pool-threshold check for one campaign and emits
@@ -1529,12 +1776,12 @@ export class ParticipationService {
   ): Promise<void> {
     const poolState = await this._evaluateCampaignPoolThresholds(campaign);
     const changed =
-      poolState.paused || poolState.newClipperIntakeStatus !== campaign.newClipperIntakeStatus;
+      poolState.closed || poolState.newClipperIntakeStatus !== campaign.newClipperIntakeStatus;
     if (onlyIfChanged && !changed) return;
     this.realtime.emitCampaignUpdated({
       id: campaign.id,
       brandProfileId: campaign.brandProfileId,
-      ...(poolState.paused ? { status: CampaignStatus.paused } : {}),
+      ...(poolState.closed ? { status: CampaignStatus.closed } : {}),
       newClipperIntakeStatus: poolState.newClipperIntakeStatus,
       poolUtilizationBps: poolState.utilizationBps,
     });
@@ -1547,7 +1794,7 @@ export class ParticipationService {
   ) {
     const { updated, metricsSource } = await this._persistDeliverableMetrics(deliverable);
 
-    // Re-evaluate the pool: close intake at the 80% threshold, auto-pause at
+    // Re-evaluate the pool: close intake at the 80% threshold, auto-close at
     // 100%. Emit exactly one campaign:updated either way so brand portal
     // pool bars and intake-status badges refresh live after every view sync.
     await this._syncCampaignPool(deliverable.participation.campaign, { onlyIfChanged: false });
@@ -1577,22 +1824,47 @@ export class ParticipationService {
     };
   }
 
-  /** Background sweep — periodically refreshes every deliverable that's
-   * actually live and trackable (a submitted proof URL, not yet in a
-   * terminal rejected state), so view/like/comment/share counts and
-   * payout estimates update on their own instead of only when a creator
-   * happens to open the app and tap "Refresh views". Every-5-minutes
-   * cadence balances "feels live" against not hammering Instagram
-   * Insights/Apify — there's no job queue in this codebase, so this runs
-   * sequentially with a short pause between each deliverable rather than
-   * in parallel, and one failure never stops the rest of the sweep. */
-  @Cron(CronExpression.EVERY_5_MINUTES)
+  // One flag per sweep type, so an hourly pass that runs long can't overlap
+  // itself (or the next tick). In-process only — see the schedule note below.
+  private readonly sweepRunning = { views: false, full: false };
+
+  /** Hourly background sweep — refreshes the view count of every deliverable
+   * that's actually live and trackable (a submitted proof URL, not yet in a
+   * terminal rejected state). Views are what campaign progress, payout
+   * estimates and creator earnings are built on, so they stay reasonably
+   * fresh without every other metric being re-fetched this often. */
+  @Cron(CronExpression.EVERY_HOUR, { timeZone: "Asia/Kolkata" })
+  async refreshActiveDeliverableViews(): Promise<void> {
+    await this._sweepActiveDeliverables("views");
+    // Right after the sweep, catch any closed campaign that never got its
+    // end-of-campaign fetch (see finalizeCampaignMetrics).
+    await this._recoverClosedCampaignFinals();
+  }
+
+  /** Daily background sweep — refreshes every metric (views, reach, likes,
+   * comments, shares, saves) for the same set of deliverables and appends
+   * one history row each, which is what the campaign report reads. Runs at
+   * 02:30, away from the top-of-the-hour views sweep. */
+  @Cron("0 30 2 * * *", { timeZone: "Asia/Kolkata" })
   async refreshActiveDeliverableMetrics(): Promise<void> {
+    await this._sweepActiveDeliverables("full");
+  }
+
+  /** Shared body of both sweeps. There's no job queue in this codebase, so
+   * it runs sequentially with a short pause between each deliverable rather
+   * than in parallel, and one failure never stops the rest of the sweep. */
+  private async _sweepActiveDeliverables(mode: "views" | "full"): Promise<void> {
+    const label = mode === "views" ? "refreshActiveDeliverableViews" : "refreshActiveDeliverableMetrics";
+    if (this.sweepRunning[mode]) {
+      this.logger.warn(`${label}: previous run still in progress — skipping this one`);
+      return;
+    }
+    this.sweepRunning[mode] = true;
     // The whole body is wrapped — a transient DB blip (a dropped Postgres
     // connection, a pool timeout) hitting the very first query would
     // otherwise throw out of this @Cron method silently: no log line, the
     // sweep just doesn't run for that cycle with nothing to show for it.
-    // Confirmed live: five consecutive 5-minute cycles produced no
+    // Confirmed live: five consecutive cycles produced no
     // "sweeping N deliverable(s)" log at all during a real connection
     // drop, and the only trace of it was an unrelated request's error log
     // at the same time — this makes that kind of gap visible instead of
@@ -1619,7 +1891,7 @@ export class ParticipationService {
       });
       if (deliverables.length === 0) return;
 
-      this.logger.log(`refreshActiveDeliverableMetrics: sweeping ${deliverables.length} deliverable(s)`);
+      this.logger.log(`${label}: sweeping ${deliverables.length} deliverable(s)`);
       let succeeded = 0;
       let failed = 0;
       // One campaign per unique id — the pool-threshold check below runs at
@@ -1628,12 +1900,12 @@ export class ParticipationService {
       const touchedCampaigns = new Map<string, (typeof deliverables)[number]["participation"]["campaign"]>();
       for (const deliverable of deliverables) {
         try {
-          await this._persistDeliverableMetrics(deliverable);
+          await this._persistDeliverableMetrics(deliverable, mode === "views" ? "hourly" : "daily");
           touchedCampaigns.set(deliverable.participation.campaign.id, deliverable.participation.campaign);
           succeeded++;
         } catch (err) {
           failed++;
-          this.logger.warn(`refreshActiveDeliverableMetrics: failed for ${deliverable.id}: ${err}`);
+          this.logger.warn(`${label}: failed for ${deliverable.id}: ${err}`);
         }
         // A small pause between calls — this is a periodic background sweep,
         // not a user waiting on a response, so there's no reason to burst
@@ -1650,13 +1922,15 @@ export class ParticipationService {
         try {
           await this._syncCampaignPool(campaign, { onlyIfChanged: true });
         } catch (err) {
-          this.logger.warn(`refreshActiveDeliverableMetrics: pool check failed for campaign ${campaign.id}: ${err}`);
+          this.logger.warn(`${label}: pool check failed for campaign ${campaign.id}: ${err}`);
         }
       }
 
-      this.logger.log(`refreshActiveDeliverableMetrics: done — ${succeeded} succeeded, ${failed} failed`);
+      this.logger.log(`${label}: done — ${succeeded} succeeded, ${failed} failed`);
     } catch (err) {
-      this.logger.warn(`refreshActiveDeliverableMetrics: sweep aborted — ${err}`);
+      this.logger.warn(`${label}: sweep aborted — ${err}`);
+    } finally {
+      this.sweepRunning[mode] = false;
     }
   }
 
@@ -1673,12 +1947,12 @@ export class ParticipationService {
     newClipperIntakeStatus: NewClipperIntakeStatus;
     poolThresholdBps: number;
   }): Promise<{
-    paused: boolean;
+    closed: boolean;
     newClipperIntakeStatus: NewClipperIntakeStatus;
     utilizationBps: number;
   }> {
     if (campaign.status !== CampaignStatus.live || campaign.budgetPaise <= 0) {
-      return { paused: false, newClipperIntakeStatus: campaign.newClipperIntakeStatus, utilizationBps: 0 };
+      return { closed: false, newClipperIntakeStatus: campaign.newClipperIntakeStatus, utilizationBps: 0 };
     }
 
     const budgetUsed = await getCampaignPoolUsage(this.prisma, campaign.id);
@@ -1697,15 +1971,21 @@ export class ParticipationService {
     }
 
     if (budgetUsed < campaign.budgetPaise) {
-      return { paused: false, newClipperIntakeStatus, utilizationBps };
+      return { closed: false, newClipperIntakeStatus, utilizationBps };
     }
 
     await this.prisma.campaign.update({
       where: { id: campaign.id },
-      data: { status: CampaignStatus.paused },
+      data: { status: CampaignStatus.closed },
     });
 
-    return { paused: true, newClipperIntakeStatus, utilizationBps };
+    // The campaign is closed first; the end-of-campaign metrics fetch runs
+    // after, in the background — closing never waits on Instagram. If this
+    // doesn't finish (restart, Instagram down), the hourly recovery check
+    // picks it up.
+    void this.finalizeCampaignMetrics(campaign.id);
+
+    return { closed: true, newClipperIntakeStatus, utilizationBps };
   }
 
   async countPendingReviewsForBrand(
