@@ -105,11 +105,26 @@ export class RealtimeGateway
   @SubscribeMessage("campaign:join")
   async handleJoinCampaign(
     @ConnectedSocket() client: Socket,
-    @MessageBody() body: { campaignId?: string },
-  ): Promise<void> {
-    if (body.campaignId) {
-      await client.join(`campaign:${body.campaignId}`);
+    @MessageBody() body: { campaignId?: unknown },
+  ): Promise<{ joined: boolean }> {
+    const campaignId = body?.campaignId;
+    const userId = client.data.userId as string | undefined;
+    const role = client.data.role as UserRole | undefined;
+    if (typeof campaignId !== "string" || campaignId.length === 0 || campaignId.length > 64 || !userId || !role) {
+      return { joined: false };
     }
+
+    // A room carries that campaign's submission/review/join events, so
+    // subscribing needs the same access as reading the campaign itself.
+    const allowed = await this.campaignAccess
+      .canJoinCampaignRoom(userId, role, campaignId)
+      .catch(() => false);
+    if (!allowed) {
+      this.logger.debug(`Refused campaign:join ${campaignId} for ${userId} (${role})`);
+      return { joined: false };
+    }
+    await client.join(`campaign:${campaignId}`);
+    return { joined: true };
   }
 
   @SubscribeMessage("campaign:leave")

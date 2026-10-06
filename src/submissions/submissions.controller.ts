@@ -28,6 +28,7 @@ import { JwtAuthGuard } from "../auth/guards/jwt-auth.guard";
 import type { AuthJwtPayload } from "../auth/auth.types";
 import { ReviewDeliverableDto } from "../participation/dto/review-deliverable.dto";
 import { ParticipationService } from "../participation/participation.service";
+import { BufferedUploadGuard } from "../direct-upload/buffered-upload.guard";
 import { ObjectStorageService } from "../storage/object-storage.service";
 import { ReviewSubmissionDto } from "./dto/review-submission.dto";
 import { SubmissionsService } from "./submissions.service";
@@ -117,6 +118,7 @@ export class SubmissionsController {
    * Drive file downloads it and re-uploads it here. Re-triggers the
    * pipeline immediately if the deliverable is still awaiting review. */
   @Post("deliverables/:id/admin-draft-copy")
+  @UseGuards(BufferedUploadGuard)
   @UseInterceptors(
     FileInterceptor("file", {
       storage: memoryStorage(),

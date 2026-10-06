@@ -1,5 +1,7 @@
 import { Logger } from "@nestjs/common";
 
+import { safeFetch, UnsafeUrlError } from "../common/safe-fetch";
+
 const logger = new Logger("AutoReviewMediaFetch");
 
 // Gemini's inline-data path tops out at 100MB; anything larger needs the
@@ -87,7 +89,7 @@ async function followDriveInterstitialIfPresent(
   retryUrl.searchParams.set("confirm", confirm);
   retryUrl.searchParams.set("uuid", uuid);
 
-  return fetch(retryUrl.toString(), {
+  return safeFetch(retryUrl.toString(), {
     signal,
     headers: cookie ? { cookie } : undefined,
   });
@@ -143,7 +145,7 @@ export async function checkMediaUrlFetchable(url: string): Promise<MediaUrlCheck
     const timer = setTimeout(() => controller.abort(), 20_000);
     let res: Response;
     try {
-      res = await fetch(fetchUrl, { signal: controller.signal });
+      res = await safeFetch(fetchUrl, { signal: controller.signal });
       res = await followDriveInterstitialIfPresent(res, controller.signal);
     } finally {
       clearTimeout(timer);
@@ -169,7 +171,10 @@ export async function checkMediaUrlFetchable(url: string): Promise<MediaUrlCheck
       };
     }
     return { fetchable: true };
-  } catch {
+  } catch (err) {
+    if (err instanceof UnsafeUrlError) {
+      return { fetchable: false, reason: `This link can't be used: ${err.message}.` };
+    }
     return { fetchable: false, reason: "Could not reach this link — double-check the URL and try again." };
   }
 }
@@ -189,7 +194,7 @@ export async function fetchMedia(url: string): Promise<FetchedMedia | null> {
   try {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 60_000);
-    const res = await fetch(fetchUrl, { signal: controller.signal }).finally(() => clearTimeout(timer));
+    const res = await safeFetch(fetchUrl, { signal: controller.signal }).finally(() => clearTimeout(timer));
     if (!res.ok) {
       logger.warn(`Fetch failed for ${url}: HTTP ${res.status}`);
       return null;

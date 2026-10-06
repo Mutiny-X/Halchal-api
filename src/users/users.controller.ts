@@ -21,6 +21,7 @@ import { CurrentUser } from "../common/decorators/current-user.decorator";
 import { JwtAuthGuard } from "../auth/guards/jwt-auth.guard";
 import type { AuthJwtPayload } from "../auth/auth.types";
 import { PushNotificationService } from "../notifications/push-notification.service";
+import { BufferedUploadGuard } from "../direct-upload/buffered-upload.guard";
 import { ObjectStorageService } from "../storage/object-storage.service";
 import { UsersService } from "./users.service";
 import { UserMeDto } from "./dto/user-me.dto";
@@ -131,6 +132,7 @@ export class UsersController {
   }
 
   @Post("me/brand-logo")
+  @UseGuards(BufferedUploadGuard)
   @UseInterceptors(
     FileInterceptor("file", {
       storage: memoryStorage(),

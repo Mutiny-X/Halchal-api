@@ -1,7 +1,13 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { AutoReviewService } from "./auto-review.service";
 import * as videoCompress from "./video-compress";
+import { setSafeFetchResolverForTests } from "../common/safe-fetch";
+
+// Hermetic DNS for the SSRF guard inside fetchMedia: test hosts resolve to a
+// public address instead of hitting the network.
+beforeAll(() => setSafeFetchResolverForTests(async () => ["93.184.216.34"]));
+afterAll(() => setSafeFetchResolverForTests(null));
 
 // compressVideoForGemini shells out to a real ffmpeg process — not
 // something a unit test should depend on. Tests that care about the
