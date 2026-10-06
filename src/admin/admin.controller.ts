@@ -25,6 +25,7 @@ import { RolesGuard } from "../common/guards/roles.guard";
 import { JwtAuthGuard } from "../auth/guards/jwt-auth.guard";
 import type { AuthJwtPayload } from "../auth/auth.types";
 import { ListCampaignsQueryDto } from "../campaigns/dto/list-campaigns-query.dto";
+import { BufferedUploadGuard } from "../direct-upload/buffered-upload.guard";
 import { ObjectStorageService } from "../storage/object-storage.service";
 import { AdminSectionRoute } from "../admin-roles/decorators/admin-section.decorator";
 import { AdminSectionGuard } from "../admin-roles/guards/admin-section.guard";
@@ -234,6 +235,7 @@ export class AdminController {
   }
 
   @Post("brand-logo")
+  @UseGuards(BufferedUploadGuard)
   @AdminSectionRoute("brands")
   @UseInterceptors(
     FileInterceptor("file", {

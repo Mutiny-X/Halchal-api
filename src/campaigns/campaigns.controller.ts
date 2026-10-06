@@ -20,6 +20,7 @@ import { memoryStorage } from "multer";
 import { UserRole } from "@prisma/client";
 
 import { imageOnlyFileFilter, imageOrVideoFileFilter } from "./campaign-upload.util";
+import { BufferedUploadGuard } from "../direct-upload/buffered-upload.guard";
 import { ObjectStorageService } from "../storage/object-storage.service";
 import { CurrentUser } from "../common/decorators/current-user.decorator";
 import { Roles } from "../common/decorators/roles.decorator";
@@ -60,6 +61,7 @@ export class CampaignsController {
   ) {}
 
   @Post("cover/upload")
+  @UseGuards(BufferedUploadGuard)
   @HttpCode(HttpStatus.OK)
   @UseInterceptors(
     FileInterceptor("file", {
@@ -88,6 +90,7 @@ export class CampaignsController {
   }
 
   @Post("reference-assets/upload")
+  @UseGuards(BufferedUploadGuard)
   @HttpCode(HttpStatus.OK)
   @UseInterceptors(
     FileInterceptor("file", {
@@ -157,6 +160,7 @@ export class CampaignsController {
   // R2 isn't configured, so callers should fall back to the multipart
   // upload route above in that case.
   @Post("reference-assets/presign-upload")
+  @UseGuards(BufferedUploadGuard)
   @HttpCode(HttpStatus.OK)
   async presignReferenceAssetUpload(
     @CurrentUser() user: AuthJwtPayload,

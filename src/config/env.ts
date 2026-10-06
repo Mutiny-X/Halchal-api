@@ -146,6 +146,13 @@ const envSchema = z.object({
    * private key, then `base64 -i key.json`). Unset = push notifications
    * report as not-configured and only log what would be sent. */
   FIREBASE_SERVICE_ACCOUNT_BASE64: z.string().optional(),
+  /** Rollout escape hatch: re-opens the website's old upload routes that
+   * send file bytes through this API even when R2 is configured. Leave
+   * unset — the website uploads straight to R2 via /uploads/direct. */
+  ALLOW_BUFFERED_WEB_UPLOADS: z
+    .string()
+    .default("false")
+    .transform((v) => v === "true" || v === "1"),
 }).superRefine((data, ctx) => {
   const r2Fields = [
     ["S3_ENDPOINT", data.S3_ENDPOINT],

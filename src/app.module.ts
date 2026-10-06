@@ -27,6 +27,7 @@ import { SupportModule } from "./support/support.module";
 import { TasksModule } from "./tasks/tasks.module";
 import { PrismaModule } from "./prisma/prisma.module";
 import { UsersModule } from "./users/users.module";
+import { DirectUploadModule } from "./direct-upload/direct-upload.module";
 import { WalletModule } from "./wallet/wallet.module";
 
 @Module({
@@ -64,6 +65,7 @@ import { WalletModule } from "./wallet/wallet.module";
     AdminModule,
     StaffModule,
     UsersModule,
+    DirectUploadModule,
     WalletModule,
     PayoutsModule,
     CampaignsModule,

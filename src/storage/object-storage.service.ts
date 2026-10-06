@@ -1,6 +1,13 @@
 import { BadRequestException, Injectable, InternalServerErrorException } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
-import { PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import {
+  CopyObjectCommand,
+  DeleteObjectCommand,
+  GetObjectCommand,
+  HeadObjectCommand,
+  PutObjectCommand,
+  S3Client,
+} from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { randomBytes } from "node:crypto";
 import { writeFileSync } from "node:fs";
@@ -173,6 +180,101 @@ export class ObjectStorageService {
     );
 
     return { uploadUrl, publicUrl };
+  }
+
+  // ── Direct (browser → R2) uploads ─────────────────────────────────────
+  // The API only signs, inspects a few KB, and copies inside R2 — the file's
+  // bytes never pass through this server.
+
+  private requireR2(): S3Client {
+    if (!this.isR2Configured() || !this.s3Client) {
+      throw new InternalServerErrorException("Object storage is not configured");
+    }
+    return this.s3Client;
+  }
+
+  private bucket(): string {
+    return this.config.get("S3_BUCKET", { infer: true });
+  }
+
+  /** Presigned PUT bound to an exact key, Content-Type AND byte size: the
+   * browser can only upload exactly the file it declared. */
+  async presignExactPut(
+    key: string,
+    contentType: string,
+    sizeBytes: number,
+    expiresInSeconds = 3600,
+  ): Promise<string> {
+    const client = this.requireR2();
+    return getSignedUrl(
+      client as unknown as Parameters<typeof getSignedUrl>[0],
+      new PutObjectCommand({
+        Bucket: this.bucket(),
+        Key: key,
+        ContentType: contentType,
+        ContentLength: sizeBytes,
+      }),
+      {
+        expiresIn: expiresInSeconds,
+        signableHeaders: new Set(["content-type", "content-length"]),
+      },
+    );
+  }
+
+  /** Short-lived signed GET — lets ffprobe read a video's headers straight
+   * from storage with range requests instead of downloading it here. */
+  async presignGet(key: string, expiresInSeconds = 300): Promise<string> {
+    const client = this.requireR2();
+    return getSignedUrl(
+      client as unknown as Parameters<typeof getSignedUrl>[0],
+      new GetObjectCommand({ Bucket: this.bucket(), Key: key }),
+      { expiresIn: expiresInSeconds },
+    );
+  }
+
+  /** Size + type of a stored object, or null when it doesn't exist. */
+  async headObject(key: string): Promise<{ size: number; contentType: string | undefined } | null> {
+    const client = this.requireR2();
+    try {
+      const head = await client.send(new HeadObjectCommand({ Bucket: this.bucket(), Key: key }));
+      return { size: Number(head.ContentLength ?? 0), contentType: head.ContentType };
+    } catch (error) {
+      const status = (error as { $metadata?: { httpStatusCode?: number } }).$metadata?.httpStatusCode;
+      if (status === 404 || (error as { name?: string }).name === "NotFound") return null;
+      throw error;
+    }
+  }
+
+  /** The first `length` bytes of an object (for file-type detection). */
+  async readObjectHead(key: string, length = 4096): Promise<Buffer> {
+    const client = this.requireR2();
+    const res = await client.send(
+      new GetObjectCommand({ Bucket: this.bucket(), Key: key, Range: `bytes=0-${length - 1}` }),
+    );
+    const bytes = await res.Body?.transformToByteArray();
+    return Buffer.from(bytes ?? []);
+  }
+
+  /** Server-side copy inside the bucket — no bytes come through this API. */
+  async copyObject(fromKey: string, toKey: string): Promise<void> {
+    const client = this.requireR2();
+    await client.send(
+      new CopyObjectCommand({
+        Bucket: this.bucket(),
+        Key: toKey,
+        CopySource: `${this.bucket()}/${fromKey.split("/").map(encodeURIComponent).join("/")}`,
+        MetadataDirective: "COPY",
+      }),
+    );
+  }
+
+  async deleteObject(key: string): Promise<void> {
+    const client = this.requireR2();
+    await client.send(new DeleteObjectCommand({ Bucket: this.bucket(), Key: key }));
+  }
+
+  publicUrlFor(key: string): string {
+    return buildR2UploadResponse(this.config.get("S3_PUBLIC_BASE_URL", { infer: true }), key, key).url;
   }
 
   private async uploadToR2(
