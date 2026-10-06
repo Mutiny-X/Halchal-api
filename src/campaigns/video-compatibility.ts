@@ -34,7 +34,18 @@ export class VideoProbeUnavailableError extends Error {
   }
 }
 
-const PROBE_INFRA_FAILURE = /Protocol not found|not supported|Connection refused|Connection timed out|timed out|Network is unreachable|Server returned 5\d\d|Server returned 403|Server returned 404|getaddrinfo|Name or service not known|ENOENT/i;
+/** ffprobe errors that genuinely mean "this isn't a usable video". Anything
+ * else (network, TLS, storage answering 400/401/403, I/O errors, a missing
+ * protocol) says nothing about the file, so it must never reject an upload
+ * — the file's signature has already been checked by then. */
+const NOT_A_VIDEO = /Invalid data found when processing input|moov atom not found|does not contain any stream|could not find codec parameters|EBML header parsing failed|Invalid NAL unit|no decoder found|Unknown format/i;
+
+/** Classifies a failed ffprobe run from its stderr. */
+export function probeFailure(stderr: string): UnsupportedVideoFormatError | VideoProbeUnavailableError {
+  return NOT_A_VIDEO.test(stderr)
+    ? new UnsupportedVideoFormatError("Could not read this file as a video. Please upload a valid MP4, MOV or WebM.")
+    : new VideoProbeUnavailableError(`ffprobe could not read the input: ${stderr.trim().slice(0, 500) || "no error output"}`);
+}
 
 function probe(input: string, timeoutMs = 45_000): Promise<ProbeStream[]> {
   return new Promise((resolve, reject) => {
@@ -67,13 +78,7 @@ function probe(input: string, timeoutMs = 45_000): Promise<ProbeStream[]> {
     proc.on("close", (code) => {
       clearTimeout(timer);
       if (code !== 0) {
-        reject(
-          PROBE_INFRA_FAILURE.test(stderr)
-            ? new VideoProbeUnavailableError(`ffprobe could not read the input: ${stderr.trim()}`)
-            : new UnsupportedVideoFormatError(
-                "Could not read this file as a video. Please upload a valid MP4, MOV or WebM.",
-              ),
-        );
+        reject(probeFailure(stderr));
         return;
       }
       try {
