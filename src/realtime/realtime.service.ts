@@ -1,6 +1,7 @@
 import { Injectable } from "@nestjs/common";
 
 import { RealtimeGateway } from "./realtime.gateway";
+import { isUnpublished } from "../campaigns/campaign-status";
 
 export type DeliverableEventPayload = {
   deliverableId: string;
@@ -136,7 +137,7 @@ export class RealtimeService {
     // running the app) only ever hear about campaigns that have been
     // published. Drafts auto-save every few seconds while being written, so
     // this also stops a stream of unpublished rates and budgets going out.
-    if (campaign.status !== "draft") {
+    if (!isUnpublished(String(campaign.status))) {
       this.gateway.emitToCreators(event, payload);
     }
     const brandProfileId = campaign.brandProfileId as string | null | undefined;

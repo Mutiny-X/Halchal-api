@@ -15,7 +15,7 @@ import {
 import { FileInterceptor } from "@nestjs/platform-express";
 import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
 import { StaffAccessLevel, SupportTicketStatus, UserRole } from "@prisma/client";
-import { IsBoolean, IsEmail, IsEnum, IsInt, IsOptional, IsString, Min, MinLength } from "class-validator";
+import { IsBoolean, IsEmail, IsEnum, IsInt, IsOptional, IsString, MaxLength, Min, MinLength } from "class-validator";
 import { memoryStorage } from "multer";
 
 import { CampaignInviteService } from "../auth/campaign-invite.service";
@@ -26,6 +26,7 @@ import { JwtAuthGuard } from "../auth/guards/jwt-auth.guard";
 import type { AuthJwtPayload } from "../auth/auth.types";
 import { ListCampaignsQueryDto } from "../campaigns/dto/list-campaigns-query.dto";
 import { BufferedUploadGuard } from "../direct-upload/buffered-upload.guard";
+import { CampaignsService } from "../campaigns/campaigns.service";
 import { ObjectStorageService } from "../storage/object-storage.service";
 import { AdminSectionRoute } from "../admin-roles/decorators/admin-section.decorator";
 import { AdminSectionGuard } from "../admin-roles/guards/admin-section.guard";
@@ -42,6 +43,13 @@ import { SendBulkNotificationDto } from "../notifications/dto/bulk-notification.
 import { RespondSupportTicketDto } from "../support/dto/support.dto";
 import { AdminService } from "./admin.service";
 
+
+class RejectCampaignDto {
+  @IsString()
+  @MinLength(5, { message: "Tell the brand what to change (at least 5 characters)" })
+  @MaxLength(1000)
+  reason!: string;
+}
 
 class SendCampaignInviteDto {
   @IsEmail()
@@ -155,6 +163,7 @@ export class AdminController {
     private readonly admin: AdminService,
     private readonly campaignInvites: CampaignInviteService,
     private readonly storage: ObjectStorageService,
+    private readonly campaigns: CampaignsService,
   ) {}
 
   @Get("me/permissions")
@@ -392,6 +401,24 @@ export class AdminController {
   @AdminSectionRoute("campaigns")
   listCampaigns(@Query() query: ListCampaignsQueryDto) {
     return this.admin.listCampaigns(query);
+  }
+
+  /** Approve a brand/staff campaign that's waiting: it goes live now. */
+  @Post("campaigns/:id/approve")
+  @AdminSectionRoute("campaigns")
+  approveCampaign(@CurrentUser() user: AuthJwtPayload, @Param("id") campaignId: string) {
+    return this.campaigns.approve(user.sub, campaignId);
+  }
+
+  /** Send a waiting campaign back to the brand (as a draft) with a reason. */
+  @Post("campaigns/:id/reject")
+  @AdminSectionRoute("campaigns")
+  rejectCampaign(
+    @CurrentUser() user: AuthJwtPayload,
+    @Param("id") campaignId: string,
+    @Body() dto: RejectCampaignDto,
+  ) {
+    return this.campaigns.reject(user.sub, campaignId, dto.reason);
   }
 
   @Get("campaigns/:id/invites")

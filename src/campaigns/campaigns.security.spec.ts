@@ -65,7 +65,7 @@ function setup() {
     emitCampaignPublished: vi.fn(),
   };
   const activityLog = { log: vi.fn().mockResolvedValue(undefined) };
-  const notifications = { create: vi.fn().mockResolvedValue(undefined) };
+  const notifications = { create: vi.fn().mockResolvedValue(undefined), notifyAllAdmins: vi.fn().mockResolvedValue(undefined) };
   const service = new CampaignsService(
     prisma as never,
     access,
@@ -82,7 +82,7 @@ function setup() {
     ...completeDraft(),
     ...data,
   }));
-  return { prisma, service, realtime };
+  return { prisma, service, realtime, notifications };
 }
 
 async function expectValidationError(promise: Promise<unknown>, message: RegExp) {
@@ -188,13 +188,17 @@ describe("server-side publish rules", () => {
 
   const publish = (existing: Record<string, unknown>, dto: Record<string, unknown> = {}) => {
     ctx.prisma.campaign.findUnique.mockResolvedValue(completeDraft(existing));
-    return ctx.service.update("user-brand", UserRole.brand, "camp-1", { status: CampaignStatus.live, ...dto } as never);
+    // Brands submit for approval — the same completeness rules apply.
+    return ctx.service.update("user-brand", UserRole.brand, "camp-1", { status: CampaignStatus.pending_review, ...dto } as never);
   };
 
-  it("publishes a complete draft and announces it", async () => {
+  it("a brand submits a complete draft for approval; admins are notified; nothing goes live", async () => {
     await publish({});
     expect(ctx.prisma.campaign.update).toHaveBeenCalled();
-    expect(ctx.realtime.emitCampaignPublished).toHaveBeenCalled();
+    expect(ctx.prisma.campaign.update.mock.calls[0][0].data).toMatchObject({ status: CampaignStatus.pending_review });
+    expect(ctx.prisma.campaign.update.mock.calls[0][0].data.submittedForReviewAt).toBeInstanceOf(Date);
+    expect(ctx.notifications.notifyAllAdmins).toHaveBeenCalledWith(expect.objectContaining({ link: "/admin/campaigns/camp-1" }));
+    expect(ctx.realtime.emitCampaignPublished).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -223,13 +227,23 @@ describe("server-side publish rules", () => {
   });
 
   it("lets a paused campaign resume even if it predates the newer content rules", async () => {
-    await publish({ status: CampaignStatus.paused, doRules: null, avoidRules: null, sourceAssets: [] });
+    ctx.prisma.campaign.findUnique.mockResolvedValue(
+      completeDraft({ status: CampaignStatus.paused, doRules: null, avoidRules: null, sourceAssets: [] }),
+    );
+    await ctx.service.update("user-brand", UserRole.brand, "camp-1", { status: CampaignStatus.live } as never);
     expect(ctx.prisma.campaign.update).toHaveBeenCalled();
   });
 
-  it("applies the same rules when a campaign is created straight into live", async () => {
+  it("a brand can't create a campaign straight into live", async () => {
+    const err = await ctx.service.create("user-brand", UserRole.brand, { title: "x", status: CampaignStatus.live } as never).catch((e) => e);
+    expect(err.getResponse()).toMatchObject({ code: "CAMPAIGN_NEEDS_APPROVAL" });
+    expect(ctx.prisma.campaign.create).not.toHaveBeenCalled();
+  });
+
+  it("applies the same rules when an admin creates a campaign straight into live", async () => {
     await expectValidationError(
-      ctx.service.create("user-brand", UserRole.brand, {
+      ctx.service.create("admin-1", UserRole.admin, {
+        brandProfileId: "brand-1",
         title: "Direct",
         status: CampaignStatus.live,
         briefHook: "Hook",
@@ -267,57 +281,49 @@ describe("publish-rule helpers", () => {
 });
 
 describe("creator notifications on publish (item 19)", () => {
-  const publishFrom = async (status: CampaignStatus, userId = "user-brand") => {
+  const change = async (status: CampaignStatus, to: CampaignStatus, userId: string, role: UserRole) => {
     const ctx = setup();
     ctx.prisma.brandProfile.findUnique.mockResolvedValue({ id: "brand-1" });
     ctx.prisma.campaign.findUnique.mockResolvedValue(completeDraft({ status }));
-    await ctx.service.update(userId, UserRole.brand, "camp-1", { status: CampaignStatus.live } as never);
+    await ctx.service.update(userId, role, "camp-1", { status: to } as never);
     await new Promise((r) => setTimeout(r, 0)); // let the fire-and-forget fan-out start
     return ctx;
   };
 
-  it("notifies every creator on the FIRST publish (draft → live)", async () => {
-    const ctx = await publishFrom(CampaignStatus.draft, "notify-a");
-    expect(ctx.prisma.user.findMany).toHaveBeenCalledTimes(1);
+  it("notifies every creator when an admin APPROVES (first time live)", async () => {
+    const ctx = await change(CampaignStatus.pending_review, CampaignStatus.live, "admin-a", UserRole.admin);
+    expect(ctx.prisma.user.findMany).toHaveBeenCalled();
     expect(ctx.realtime.emitCampaignPublished).toHaveBeenCalled();
   });
 
   it("does NOT re-blast creators (push + paid WhatsApp) when a paused campaign resumes", async () => {
-    const ctx = await publishFrom(CampaignStatus.paused, "notify-b");
+    const ctx = await change(CampaignStatus.paused, CampaignStatus.live, "notify-b", UserRole.brand);
     expect(ctx.prisma.user.findMany).not.toHaveBeenCalled();
-    // The app still hears it went live again (realtime only, no WhatsApp).
     expect(ctx.realtime.emitCampaignPublished).toHaveBeenCalled();
   });
 
-  it("caps how many campaigns one brand account can launch per hour (10)", async () => {
+  it("caps how many campaigns one brand account can submit per hour (10)", async () => {
     const userId = `limit-${Date.now()}`;
     for (let i = 0; i < 10; i += 1) {
-      await publishFrom(CampaignStatus.draft, userId);
+      await change(CampaignStatus.draft, CampaignStatus.pending_review, userId, UserRole.brand);
     }
     const ctx = setup();
     ctx.prisma.brandProfile.findUnique.mockResolvedValue({ id: "brand-1" });
     ctx.prisma.campaign.findUnique.mockResolvedValue(completeDraft());
     const err = await ctx.service
-      .update(userId, UserRole.brand, "camp-1", { status: CampaignStatus.live } as never)
+      .update(userId, UserRole.brand, "camp-1", { status: CampaignStatus.pending_review } as never)
       .catch((e) => e);
     expect(err.getStatus?.()).toBe(429);
     expect(ctx.prisma.campaign.update).not.toHaveBeenCalled();
   });
 
-  it("the cap doesn't count failed publishes, resumes, or apply to admins", async () => {
+  it("the cap doesn't count resumes, and admins aren't limited", async () => {
     const userId = `nocount-${Date.now()}`;
-    // 12 resumes from paused — not first publishes, so never limited.
-    for (let i = 0; i < 12; i += 1) await publishFrom(CampaignStatus.paused, userId);
-    const ctx = setup();
-    ctx.prisma.brandProfile.findUnique.mockResolvedValue({ id: "brand-1" });
-    ctx.prisma.campaign.findUnique.mockResolvedValue(completeDraft());
-    await ctx.service.update(userId, UserRole.brand, "camp-1", { status: CampaignStatus.live } as never);
+    for (let i = 0; i < 12; i += 1) await change(CampaignStatus.paused, CampaignStatus.live, userId, UserRole.brand);
+    const ctx = await change(CampaignStatus.draft, CampaignStatus.pending_review, userId, UserRole.brand);
     expect(ctx.prisma.campaign.update).toHaveBeenCalled();
-
     for (let i = 0; i < 12; i += 1) {
-      const a = setup();
-      a.prisma.campaign.findUnique.mockResolvedValue(completeDraft());
-      await a.service.update("admin-many", UserRole.admin, "camp-1", { status: CampaignStatus.live } as never);
+      const a = await change(CampaignStatus.draft, CampaignStatus.live, "admin-many", UserRole.admin);
       expect(a.prisma.campaign.update).toHaveBeenCalled();
     }
   });
@@ -401,9 +407,9 @@ describe("campaign start date (can't start in the past)", () => {
   });
 
   it("first publish needs a start date, and not one that has already passed", async () => {
-    await expectValidationError(updateWith({ startDate: null }, { status: CampaignStatus.live }).run, /Choose a start date/);
+    await expectValidationError(updateWith({ startDate: null }, { status: CampaignStatus.pending_review }).run, /Choose a start date/);
     await expectValidationError(
-      updateWith({ startDate: new Date(Date.now() - 2 * 86_400_000) }, { status: CampaignStatus.live }).run,
+      updateWith({ startDate: new Date(Date.now() - 2 * 86_400_000) }, { status: CampaignStatus.pending_review }).run,
       /start date has passed/,
     );
   });

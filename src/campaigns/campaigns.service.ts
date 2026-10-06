@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ConflictException,
   ForbiddenException,
   Injectable,
   Logger,
@@ -38,6 +39,7 @@ import { campaignFileUrls } from "./campaign-files";
 import { parseStartDay, startDateProblem } from "./start-date-rules";
 import type { CreateCampaignDto, UpdateCampaignDto } from "./dto/campaign.dto";
 import type { ListCampaignsQueryDto } from "./dto/list-campaigns-query.dto";
+import { isUnpublished } from "./campaign-status";
 
 @Injectable()
 export class CampaignsService {
@@ -289,6 +291,11 @@ export class CampaignsService {
   async create(userId: string, role: UserRole, dto: CreateCampaignDto) {
     const status = dto.status ?? CampaignStatus.draft;
     const isLive = status === CampaignStatus.live;
+    // Only admins put campaigns live. Everyone else starts a draft and
+    // submits it for approval (update → pending_review).
+    if (role !== UserRole.admin && status !== CampaignStatus.draft) {
+      throw needsApproval();
+    }
 
     let brandProfileId: string | null = null;
     let ownership: CampaignOwnership = CampaignOwnership.brand_created;
@@ -456,9 +463,41 @@ export class CampaignsService {
       this.assertStatusTransition(existing.status, dto.status);
     }
 
+    // Waiting for approval: what the admin reviews is exactly what goes
+    // live, so brands/staff can't change anything — only withdraw it (back
+    // to draft) or end it. Admins, as the reviewers, may still adjust.
+    if (existing.status === CampaignStatus.pending_review && role !== UserRole.admin) {
+      const changesContent = Object.entries(dto).some(
+        ([key, value]) => value !== undefined && key !== "status" && key !== "wizardStep",
+      );
+      if (changesContent || !dto.status || dto.status === CampaignStatus.pending_review) {
+        throw new ConflictException({
+          code: "CAMPAIGN_LOCKED",
+          message: "This campaign is waiting for admin approval, so it can't be changed. Withdraw it to make changes.",
+        });
+      }
+    }
+
+    // Only an admin turns an unpublished campaign live (that IS the approval).
     if (
+      role !== UserRole.admin &&
       nextStatus === CampaignStatus.live &&
-      existing.status !== CampaignStatus.live
+      isUnpublished(existing.status)
+    ) {
+      throw needsApproval();
+    }
+
+    const isFirstGoLive = nextStatus === CampaignStatus.live && isUnpublished(existing.status);
+    const isSubmission =
+      nextStatus === CampaignStatus.pending_review && existing.status === CampaignStatus.draft;
+    const isApproval =
+      nextStatus === CampaignStatus.live && existing.status === CampaignStatus.pending_review;
+    const isWithdrawal =
+      existing.status === CampaignStatus.pending_review && nextStatus === CampaignStatus.draft;
+
+    if (
+      (nextStatus === CampaignStatus.live && existing.status !== CampaignStatus.live) ||
+      isSubmission
     ) {
       const nextLocationType = dto.locationType ?? existing.locationType;
       this.assertPublishable(
@@ -482,9 +521,11 @@ export class CampaignsService {
         // Full content rules apply to a first publish only. A paused
         // campaign was already live once — re-checking it against rules that
         // didn't exist when it launched would strand older campaigns paused.
-        { firstPublish: existing.status === CampaignStatus.draft },
+        // (Submitting for approval is checked the same way, so the admin
+        // only ever sees complete campaigns.)
+        { firstPublish: isUnpublished(existing.status) },
       );
-      if (existing.status === CampaignStatus.draft && role === UserRole.brand) {
+      if (isSubmission && role === UserRole.brand) {
         brandFirstPublishLimiter.consume(userId);
       }
       const effectiveBrandProfileId =
@@ -523,6 +564,11 @@ export class CampaignsService {
       data: {
         brandProfileId: role === UserRole.admin ? dto.brandProfileId : undefined,
         status: dto.status,
+        ...(isSubmission ? { submittedForReviewAt: new Date(), reviewRejectionReason: null } : {}),
+        ...(isWithdrawal ? { submittedForReviewAt: null } : {}),
+        ...(isFirstGoLive && role === UserRole.admin
+          ? { reviewedAt: new Date(), reviewedByUserId: userId, reviewRejectionReason: null }
+          : {}),
         wizardStep: this.furthestWizardStep(existing.wizardStep, dto.wizardStep),
         title: dto.title,
         category: dto.category,
@@ -566,13 +612,120 @@ export class CampaignsService {
       // live (draft → live — a campaign never returns to draft, so this can
       // happen once). Resuming a paused campaign must not re-send a paid
       // WhatsApp blast to everyone each time it's toggled.
-      if (existing.status === CampaignStatus.draft) {
+      if (isUnpublished(existing.status)) {
         this.notifyCreatorsOfNewCampaign(formatted);
+      }
+      if (isApproval) {
+        await this.notifyBrandAboutReview(campaign, {
+          type: "campaign.approved",
+          title: "Your campaign is live",
+          body: `${campaign.title} was approved and is now live for creators.`,
+        });
       }
     } else {
       this.realtime.emitCampaignUpdated(formatted);
     }
+    if (isSubmission) {
+      await this.notifications.notifyAllAdmins({
+        type: "campaign.submitted_for_review",
+        title: "Campaign waiting for approval",
+        body: campaign.title,
+        link: `/admin/campaigns/${campaign.id}`,
+      });
+    }
     return formatted;
+  }
+
+  /** Admin approves a campaign that's waiting: same checks as any first
+   * publish, then it goes live (and creators are told) right away. */
+  async approve(adminUserId: string, campaignId: string) {
+    const existing = await this.prisma.campaign.findUnique({ where: { id: campaignId }, select: { status: true } });
+    if (!existing) {
+      throw new NotFoundException({ code: "NOT_FOUND", message: "Campaign not found" });
+    }
+    if (existing.status !== CampaignStatus.pending_review) {
+      throw new BadRequestException({
+        code: "VALIDATION_ERROR",
+        message: "Only a campaign waiting for approval can be approved",
+      });
+    }
+    const result = await this.update(adminUserId, UserRole.admin, campaignId, { status: CampaignStatus.live } as UpdateCampaignDto);
+    await this.activityLog
+      .log(adminUserId, "campaign.approved", { targetType: "Campaign", targetId: campaignId, metadata: { title: result.title } })
+      .catch(() => undefined);
+    return result;
+  }
+
+  /** Admin sends a submitted campaign back to the brand with a reason. */
+  async reject(adminUserId: string, campaignId: string, reason: string) {
+    const existing = await this.prisma.campaign.findUnique({ where: { id: campaignId } });
+    if (!existing) {
+      throw new NotFoundException({ code: "NOT_FOUND", message: "Campaign not found" });
+    }
+    if (existing.status !== CampaignStatus.pending_review) {
+      throw new BadRequestException({
+        code: "VALIDATION_ERROR",
+        message: "Only a campaign waiting for approval can be rejected",
+      });
+    }
+    const trimmed = reason.trim();
+    const campaign = await this.prisma.campaign.update({
+      where: { id: campaignId },
+      data: {
+        status: CampaignStatus.draft,
+        submittedForReviewAt: null,
+        reviewRejectionReason: trimmed,
+        reviewedAt: new Date(),
+        reviewedByUserId: adminUserId,
+      },
+    });
+    await this.activityLog
+      .log(adminUserId, "campaign.rejected", {
+        targetType: "Campaign",
+        targetId: campaignId,
+        brandProfileId: campaign.brandProfileId ?? undefined,
+        metadata: { title: campaign.title, reason: trimmed },
+      })
+      .catch(() => undefined);
+    await this.notifyBrandAboutReview(campaign, {
+      type: "campaign.rejected",
+      title: "Changes needed before your campaign can go live",
+      body: `${campaign.title}: ${trimmed}`,
+    });
+    const formatted = this.formatCampaign(campaign);
+    this.realtime.emitCampaignUpdated(formatted);
+    return formatted;
+  }
+
+  /** Tells the brand owner (and the staff member who created it, if any)
+   * how the admin review went. Never throws — a missed notification must
+   * not undo an approval. */
+  private async notifyBrandAboutReview(
+    campaign: { id: string; brandProfileId: string | null; createdByUserId: string | null },
+    input: { type: string; title: string; body: string },
+  ): Promise<void> {
+    try {
+      const owner = campaign.brandProfileId
+        ? await this.prisma.brandProfile.findUnique({ where: { id: campaign.brandProfileId }, select: { userId: true } })
+        : null;
+      const recipients = new Set([owner?.userId, campaign.createdByUserId].filter((x): x is string => Boolean(x)));
+      const users = await this.prisma.user.findMany({
+        where: { id: { in: [...recipients] }, role: { in: [UserRole.brand, UserRole.staff] } },
+        select: { id: true, role: true },
+      });
+      await Promise.all(
+        users.map((u) =>
+          this.notifications.create(
+            u.id,
+            u.role === UserRole.staff ? "staff" : "brand",
+            { ...input, link: `/campaigns/${campaign.id}` },
+            campaign.brandProfileId ?? undefined,
+          ),
+        ),
+      );
+    } catch (error) {
+      this.logger.warn(`Couldn't notify brand about review of ${campaign.id}: ${error}`);
+    }
   }
 
   async remove(userId: string, role: UserRole, campaignId: string) {
@@ -743,7 +896,8 @@ export class CampaignsService {
     if (from === to) return;
 
     const allowed: Record<CampaignStatus, CampaignStatus[]> = {
-      [CampaignStatus.draft]: [CampaignStatus.live, CampaignStatus.closed],
+      [CampaignStatus.draft]: [CampaignStatus.pending_review, CampaignStatus.live, CampaignStatus.closed],
+      [CampaignStatus.pending_review]: [CampaignStatus.draft, CampaignStatus.live, CampaignStatus.closed],
       [CampaignStatus.live]: [CampaignStatus.paused, CampaignStatus.closed],
       [CampaignStatus.paused]: [CampaignStatus.live, CampaignStatus.closed],
       [CampaignStatus.closed]: [],
@@ -837,7 +991,7 @@ export class CampaignsService {
       },
     });
 
-    if (!campaign || campaign.status === CampaignStatus.draft) {
+    if (!campaign || isUnpublished(campaign.status)) {
       throw new NotFoundException({
         code: "NOT_FOUND",
         message: "Campaign not available",
@@ -874,8 +1028,16 @@ export class CampaignsService {
       brandProfile?: { companyName: string; logoUrl: string | null } | null;
     },
   ) {
+    // Creators (mobile app) get exactly the fields they had before — the
+    // brand's review history isn't theirs to see.
+    const {
+      submittedForReviewAt: _submitted,
+      reviewRejectionReason: _reason,
+      reviewedAt: _reviewed,
+      ...forCreator
+    } = this.formatCampaign(c);
     return {
-      ...this.formatCampaign(c),
+      ...forCreator,
       brandCompanyName: c.brandProfile?.companyName ?? null,
       brandLogoUrl: c.brandProfile?.logoUrl ?? null,
     };
@@ -915,6 +1077,9 @@ export class CampaignsService {
     startDate: Date | null;
     createdAt: Date;
     updatedAt?: Date;
+    submittedForReviewAt?: Date | null;
+    reviewRejectionReason?: string | null;
+    reviewedAt?: Date | null;
   }) {
     const rawPercent =
       c.budgetPaise > 0
@@ -975,6 +1140,10 @@ export class CampaignsService {
       startDate: c.startDate?.toISOString() ?? null,
       createdAt: c.createdAt.toISOString(),
       updatedAt: c.updatedAt?.toISOString() ?? c.createdAt.toISOString(),
+      // Admin approval trail (brand/admin views only — stripped for creators).
+      submittedForReviewAt: c.submittedForReviewAt?.toISOString() ?? null,
+      reviewRejectionReason: c.reviewRejectionReason ?? null,
+      reviewedAt: c.reviewedAt?.toISOString() ?? null,
     };
   }
 
@@ -999,6 +1168,13 @@ export class CampaignsService {
 
     return composed;
   }
+}
+
+function needsApproval(): ForbiddenException {
+  return new ForbiddenException({
+    code: "CAMPAIGN_NEEDS_APPROVAL",
+    message: "Only an admin can put a campaign live. Submit it for approval instead.",
+  });
 }
 
 /** Each first publish notifies every creator (push + paid WhatsApp), and

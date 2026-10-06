@@ -3,9 +3,10 @@ import {
   Injectable,
   NotFoundException,
 } from "@nestjs/common";
-import { CampaignOwnership, CampaignStatus, StaffAccessLevel, UserRole } from "@prisma/client";
+import { CampaignOwnership, StaffAccessLevel, UserRole } from "@prisma/client";
 
 import { PrismaService } from "../prisma/prisma.service";
+import { isUnpublished } from "../campaigns/campaign-status";
 
 @Injectable()
 export class CampaignAccessService {
@@ -82,7 +83,7 @@ export class CampaignAccessService {
     if (!campaign) return false;
 
     if (role === UserRole.creator) {
-      return campaign.status !== CampaignStatus.draft;
+      return !isUnpublished(campaign.status);
     }
 
     try {

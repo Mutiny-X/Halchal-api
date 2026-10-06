@@ -73,6 +73,14 @@ export class StaffService {
 
   async createCampaignForBrand(staffUserId: string, brandProfileId: string, dto: CreateCampaignDto) {
     await this.assertAssigned(staffUserId, brandProfileId, { requireWrite: true });
+    // This calls create() with the admin role (for admin-created ownership),
+    // so it must not become a way around approval: staff start drafts only.
+    if (dto.status && dto.status !== CampaignStatus.draft) {
+      throw new ForbiddenException({
+        code: "CAMPAIGN_NEEDS_APPROVAL",
+        message: "Only an admin can put a campaign live. Submit it for approval instead.",
+      });
+    }
     return this.campaigns.create(staffUserId, UserRole.admin, {
       ...dto,
       brandProfileId,
