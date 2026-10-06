@@ -41,25 +41,39 @@ export class AuthService {
     }
 
     const passwordHash = await bcrypt.hash(dto.password, 12);
-    const user = await this.prisma.user.create({
-      data: {
-        role: UserRole.brand,
-        email,
-        passwordHash,
-        displayName: dto.displayName?.trim() || dto.companyName,
-        termsAcceptedAt: new Date(),
-      },
-    });
-
-    const [brandProfile] = await this.prisma.$transaction([
-      this.prisma.brandProfile.create({
+    // One nested write = one transaction: the user, brand profile and wallet
+    // are created together or not at all. Separately, a failure after the
+    // user row left a brand login with no BrandProfile, which campaign
+    // scoping then had no brand to filter on.
+    let user: User & { brandProfile: { id: string } | null };
+    try {
+      user = await this.prisma.user.create({
         data: {
-          userId: user.id,
-          companyName: dto.companyName.trim(),
+          role: UserRole.brand,
+          email,
+          passwordHash,
+          displayName: dto.displayName?.trim() || dto.companyName,
+          termsAcceptedAt: new Date(),
+          brandProfile: { create: { companyName: dto.companyName.trim() } },
+          wallet: { create: {} },
         },
-      }),
-      this.prisma.wallet.create({ data: { userId: user.id } }),
-    ]);
+        include: { brandProfile: { select: { id: true } } },
+      });
+    } catch (error) {
+      // Two sign-ups racing on the same email: the unique index catches the
+      // second one — report it the same way as the pre-check above.
+      if (
+        error instanceof Prisma.PrismaClientKnownRequestError &&
+        error.code === "P2002"
+      ) {
+        throw new ConflictException({
+          code: "CONFLICT",
+          message: "This email already has an account. Sign in instead.",
+        });
+      }
+      throw error;
+    }
+    const brandProfile = user.brandProfile!;
 
     await this.notifications.notifyAllAdmins({
       type: "brand.registered",

@@ -31,6 +31,9 @@ enum KycStatus {
 enum CampaignStatus {
   draft
 
+  /// Submitted by a brand/staff member; goes live only when an admin approves.
+  pending_review
+
   live
 
   paused
@@ -587,6 +590,16 @@ model Campaign {
 
   inviteAcceptedAt DateTime? @map("invite_accepted_at")
 
+  /// Admin approval trail for brand/staff campaigns (see pending_review).
+  submittedForReviewAt DateTime? @map("submitted_for_review_at")
+
+  /// Why an admin sent it back; shown to the brand until it's resubmitted.
+  reviewRejectionReason String? @map("review_rejection_reason") @db.Text
+
+  reviewedAt DateTime? @map("reviewed_at")
+
+  reviewedByUserId String? @map("reviewed_by_user_id")
+
   title String
 
   category String?
@@ -946,12 +959,14 @@ model FormatDeliverable {
 
   draftDriveUrl String? @map("draft_drive_url")
 
-  /** A copy of the source video the brand/admin uploaded themselves — for
+  /**
+   * A copy of the source video the brand/admin uploaded themselves — for
    * when draftDriveUrl is a Google Drive link the auto-review pipeline can't
    * fetch (Drive links need OAuth/service-account access and don't reliably
    * return raw bytes for a plain HTTP fetch). When set, the auto-review
    * pipeline reads this instead of draftDriveUrl; draftDriveUrl itself is
-   * untouched — it stays the creator's actual submission record. */
+   * untouched — it stays the creator's actual submission record.
+   */
   adminUploadedDraftUrl String? @map("admin_uploaded_draft_url")
 
   livePostUrl String? @map("live_post_url")

@@ -1,6 +1,7 @@
 import { Injectable } from "@nestjs/common";
 
 import { RealtimeGateway } from "./realtime.gateway";
+import { isUnpublished } from "../campaigns/campaign-status";
 
 export type DeliverableEventPayload = {
   deliverableId: string;
@@ -132,7 +133,13 @@ export class RealtimeService {
   ): void {
     const payload = { campaign };
     this.gateway.emitToAdmin(event, payload);
-    this.gateway.emitToCreators(event, payload);
+    // A draft is private to its brand and admins — creators (every phone
+    // running the app) only ever hear about campaigns that have been
+    // published. Drafts auto-save every few seconds while being written, so
+    // this also stops a stream of unpublished rates and budgets going out.
+    if (!isUnpublished(String(campaign.status))) {
+      this.gateway.emitToCreators(event, payload);
+    }
     const brandProfileId = campaign.brandProfileId as string | null | undefined;
     if (brandProfileId) {
       this.gateway.emitToBrand(brandProfileId, event, payload);

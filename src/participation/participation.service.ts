@@ -31,6 +31,7 @@ import { DRAFT_URL_MESSAGE, isUploadedFileUrl, isValidDraftUrl } from "./drive-u
 import { ReviewDeliverableAction } from "./dto/review-deliverable.dto";
 import type { SubmitDraftDto } from "./dto/submit-draft.dto";
 import type { SubmitLiveProofDto } from "./dto/submit-live-proof.dto";
+import { isUnpublished } from "../campaigns/campaign-status";
 import {
   computeParticipationSummary,
   isParticipationCompleted,
@@ -617,7 +618,7 @@ export class ParticipationService {
     const campaign = await this.prisma.campaign.findUnique({
       where: { id: campaignId },
     });
-    if (!campaign || campaign.status === CampaignStatus.draft) {
+    if (!campaign || isUnpublished(campaign.status)) {
       throw new NotFoundException({
         code: "NOT_FOUND",
         message: "Campaign not available",

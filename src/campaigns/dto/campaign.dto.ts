@@ -12,6 +12,7 @@ import {
   IsOptional,
   IsString,
   IsUrl,
+  Max,
   MaxLength,
   Min,
   MinLength,
@@ -20,6 +21,10 @@ import {
 
 import { CAMPAIGN_PLATFORM_IDS } from "../campaign-platforms";
 import { CAMPAIGN_LOCATION_TYPES, INDIA_STATES } from "../india-states";
+
+/** ₹2 crore in paise — keeps money fields well inside the Postgres Int
+ * column (max 2,147,483,647) so an oversized value is a clean 400, not a 500. */
+export const MAX_MONEY_PAISE = 2_000_000_000;
 
 export class SourceAssetDto {
   @ApiProperty({ enum: ["drive", "youtube", "upload"] })
@@ -214,18 +219,21 @@ export class CreateCampaignDto {
   @IsOptional()
   @IsInt()
   @Min(1)
+  @Max(MAX_MONEY_PAISE, { message: "Amount is too large (max ₹2 crore)" })
   ratePer1kPaise?: number;
 
   @ApiPropertyOptional()
   @IsOptional()
   @IsInt()
   @Min(100)
+  @Max(MAX_MONEY_PAISE, { message: "Amount is too large (max ₹2 crore)" })
   maxPayoutPaise?: number;
 
   @ApiPropertyOptional()
   @IsOptional()
   @IsInt()
   @Min(100)
+  @Max(MAX_MONEY_PAISE, { message: "Amount is too large (max ₹2 crore)" })
   budgetPaise?: number;
 }
 
@@ -352,18 +360,21 @@ export class UpdateCampaignDto {
   @IsOptional()
   @IsInt()
   @Min(1)
+  @Max(MAX_MONEY_PAISE, { message: "Amount is too large (max ₹2 crore)" })
   ratePer1kPaise?: number;
 
   @ApiPropertyOptional()
   @IsOptional()
   @IsInt()
   @Min(100)
+  @Max(MAX_MONEY_PAISE, { message: "Amount is too large (max ₹2 crore)" })
   maxPayoutPaise?: number;
 
   @ApiPropertyOptional()
   @IsOptional()
   @IsInt()
   @Min(100)
+  @Max(MAX_MONEY_PAISE, { message: "Amount is too large (max ₹2 crore)" })
   budgetPaise?: number;
 }
 
