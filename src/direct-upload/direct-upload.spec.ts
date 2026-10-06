@@ -113,10 +113,13 @@ describe("DirectUploadService.presign", () => {
     await expect(setup().service.presign("u1", UserRole.brand, input as never)).rejects.toBeInstanceOf(BadRequestException);
   });
 
-  it("allows a 5 GB campaign video", async () => {
+  it("allows a 4.9 GB campaign video, but not R2's single-upload ceiling (5 GB)", async () => {
+    await expect(
+      setup().service.presign("u1", UserRole.brand, { purpose: "campaign-asset", contentType: "video/mp4", size: Math.floor(4.9 * 1024 ** 3) }),
+    ).resolves.toBeTruthy();
     await expect(
       setup().service.presign("u1", UserRole.brand, { purpose: "campaign-asset", contentType: "video/mp4", size: 5 * 1024 ** 3 }),
-    ).resolves.toBeTruthy();
+    ).rejects.toBeInstanceOf(BadRequestException);
   });
 
   it("enforces who may upload what", async () => {
@@ -261,7 +264,7 @@ describe("source files from device: 3 GB limit", () => {
     expect(err).toBeInstanceOf(BadRequestException);
     expect(err.getResponse().message).toBe("File is 3.0 GB — the limit here is 3 GB");
   });
-  it("sample content keeps its 5 GB limit", async () => {
+  it("sample content keeps its higher limit", async () => {
     await expect(setup().service.presign("u-src", UserRole.brand, { purpose: "campaign-asset", contentType: "video/mp4", size: 4 * GB })).resolves.toBeTruthy();
   });
   it("source uploads land in the same campaign folder (so campaign link rules accept them)", async () => {

@@ -37,7 +37,7 @@ import type { Env } from "../config/env";
 import { ObjectStorageService } from "../storage/object-storage.service";
 import { assertCampaignUrlsAllowed } from "./asset-url-rules";
 import { campaignFileUrls } from "./campaign-files";
-import { parseStartDay, startDateProblem } from "./start-date-rules";
+import { parseStartDay, startDateForStorage, startDateProblem, storedStartDays } from "./start-date-rules";
 import type { CreateCampaignDto, UpdateCampaignDto } from "./dto/campaign.dto";
 import type { ListCampaignsQueryDto } from "./dto/list-campaigns-query.dto";
 import { isUnpublished } from "./campaign-status";
@@ -400,7 +400,7 @@ export class CampaignsService {
         ratePer1kPaise: dto.ratePer1kPaise ?? 5_000,
         maxPayoutPaise: dto.maxPayoutPaise ?? 5_000_000,
         budgetPaise: dto.budgetPaise ?? 10_000_000,
-        startDate: dto.startDate ? new Date(dto.startDate) : undefined,
+        startDate: dto.startDate ? startDateForStorage(dto.startDate) : undefined,
       },
     });
 
@@ -452,11 +452,9 @@ export class CampaignsService {
     // Only a NEW or CHANGED start date is checked: a live campaign that
     // started last week legitimately has a past date, and the wizard re-sends
     // it on every save.
-    if (
-      dto.startDate &&
-      parseStartDay(dto.startDate) !== (existing.startDate ? parseStartDay(existing.startDate) : null)
-    ) {
-      const problem = startDateProblem(dto.startDate);
+    const startDateChanged = Boolean(dto.startDate) && !storedStartDays(existing.startDate).has(parseStartDay(dto.startDate!) ?? "");
+    if (startDateChanged) {
+      const problem = startDateProblem(dto.startDate!);
       if (problem) throw new BadRequestException({ code: "VALIDATION_ERROR", message: problem });
     }
 
@@ -592,7 +590,9 @@ export class CampaignsService {
         ratePer1kPaise: dto.ratePer1kPaise,
         maxPayoutPaise: dto.maxPayoutPaise,
         budgetPaise: dto.budgetPaise,
-        startDate: dto.startDate ? new Date(dto.startDate) : undefined,
+        // An unchanged date is left exactly as stored (re-saving what the
+        // client displayed must never shift it).
+        startDate: startDateChanged ? startDateForStorage(dto.startDate!) : undefined,
       },
     });
 
@@ -635,12 +635,16 @@ export class CampaignsService {
       });
     }
     if (isSubmission) {
-      await this.notifications.notifyAllAdmins({
-        type: "campaign.submitted_for_review",
-        title: "Campaign waiting for approval",
-        body: campaign.title,
-        link: `/admin/campaigns/${campaign.id}`,
-      });
+      // In the background: the push to every admin mustn't slow (or fail)
+      // the brand's submit.
+      void this.notifications
+        .notifyAllAdmins({
+          type: "campaign.submitted_for_review",
+          title: "Campaign waiting for approval",
+          body: campaign.title,
+          link: `/admin/campaigns/${campaign.id}`,
+        })
+        .catch((error) => this.logger.warn(`Couldn't notify admins about ${campaign.id}: ${error}`));
     }
     return formatted;
   }
