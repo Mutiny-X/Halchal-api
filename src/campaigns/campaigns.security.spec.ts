@@ -264,3 +264,93 @@ describe("publish-rule helpers", () => {
     expect(hasUsableSourceAsset({ url: "https://x" })).toBe(false);
   });
 });
+
+describe("creator notifications on publish (item 19)", () => {
+  const publishFrom = async (status: CampaignStatus, userId = "user-brand") => {
+    const ctx = setup();
+    ctx.prisma.brandProfile.findUnique.mockResolvedValue({ id: "brand-1" });
+    ctx.prisma.campaign.findUnique.mockResolvedValue(completeDraft({ status }));
+    await ctx.service.update(userId, UserRole.brand, "camp-1", { status: CampaignStatus.live } as never);
+    await new Promise((r) => setTimeout(r, 0)); // let the fire-and-forget fan-out start
+    return ctx;
+  };
+
+  it("notifies every creator on the FIRST publish (draft → live)", async () => {
+    const ctx = await publishFrom(CampaignStatus.draft, "notify-a");
+    expect(ctx.prisma.user.findMany).toHaveBeenCalledTimes(1);
+    expect(ctx.realtime.emitCampaignPublished).toHaveBeenCalled();
+  });
+
+  it("does NOT re-blast creators (push + paid WhatsApp) when a paused campaign resumes", async () => {
+    const ctx = await publishFrom(CampaignStatus.paused, "notify-b");
+    expect(ctx.prisma.user.findMany).not.toHaveBeenCalled();
+    // The app still hears it went live again (realtime only, no WhatsApp).
+    expect(ctx.realtime.emitCampaignPublished).toHaveBeenCalled();
+  });
+
+  it("caps how many campaigns one brand account can launch per hour (10)", async () => {
+    const userId = `limit-${Date.now()}`;
+    for (let i = 0; i < 10; i += 1) {
+      await publishFrom(CampaignStatus.draft, userId);
+    }
+    const ctx = setup();
+    ctx.prisma.brandProfile.findUnique.mockResolvedValue({ id: "brand-1" });
+    ctx.prisma.campaign.findUnique.mockResolvedValue(completeDraft());
+    const err = await ctx.service
+      .update(userId, UserRole.brand, "camp-1", { status: CampaignStatus.live } as never)
+      .catch((e) => e);
+    expect(err.getStatus?.()).toBe(429);
+    expect(ctx.prisma.campaign.update).not.toHaveBeenCalled();
+  });
+
+  it("the cap doesn't count failed publishes, resumes, or apply to admins", async () => {
+    const userId = `nocount-${Date.now()}`;
+    // 12 resumes from paused — not first publishes, so never limited.
+    for (let i = 0; i < 12; i += 1) await publishFrom(CampaignStatus.paused, userId);
+    const ctx = setup();
+    ctx.prisma.brandProfile.findUnique.mockResolvedValue({ id: "brand-1" });
+    ctx.prisma.campaign.findUnique.mockResolvedValue(completeDraft());
+    await ctx.service.update(userId, UserRole.brand, "camp-1", { status: CampaignStatus.live } as never);
+    expect(ctx.prisma.campaign.update).toHaveBeenCalled();
+
+    for (let i = 0; i < 12; i += 1) {
+      const a = setup();
+      a.prisma.campaign.findUnique.mockResolvedValue(completeDraft());
+      await a.service.update("admin-many", UserRole.admin, "camp-1", { status: CampaignStatus.live } as never);
+      expect(a.prisma.campaign.update).toHaveBeenCalled();
+    }
+  });
+});
+
+describe("campaign link rules are enforced on save (item 15)", () => {
+  it("refuses a new off-site link on update, keeps an existing legacy one", async () => {
+    const ctx = setup();
+    ctx.prisma.brandProfile.findUnique.mockResolvedValue({ id: "brand-1" });
+    ctx.prisma.campaign.findUnique.mockResolvedValue(
+      completeDraft({ sourceAssets: [{ type: "drive", url: "drive.google.com/legacy" }] }),
+    );
+    // Re-sending the legacy link is fine…
+    await ctx.service.update("user-brand", UserRole.brand, "camp-1", {
+      sourceAssets: [{ type: "drive", url: "drive.google.com/legacy" }],
+    } as never);
+    expect(ctx.prisma.campaign.update).toHaveBeenCalledTimes(1);
+    // …a new off-site one isn't.
+    await expectValidationError(
+      ctx.service.update("user-brand", UserRole.brand, "camp-1", {
+        referenceAssets: [{ type: "image", url: "https://evil.example.com/x.png" }],
+      } as never),
+      /Sample content/,
+    );
+    expect(ctx.prisma.campaign.update).toHaveBeenCalledTimes(1);
+  });
+
+  it("refuses an off-site cover on create", async () => {
+    const ctx = setup();
+    ctx.prisma.brandProfile.findUnique.mockResolvedValue({ id: "brand-1" });
+    await expectValidationError(
+      ctx.service.create("user-brand", UserRole.brand, { title: "x", coverImageUrl: "https://evil.example.com/c.png" } as never),
+      /Cover image/,
+    );
+    expect(ctx.prisma.campaign.create).not.toHaveBeenCalled();
+  });
+});

@@ -4,7 +4,9 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  Optional,
 } from "@nestjs/common";
+import { ConfigService } from "@nestjs/config";
 import {
   CampaignInviteStatus,
   CampaignOwnership,
@@ -20,6 +22,7 @@ import {
 import { ActivityLogService } from "../activity/activity-log.service";
 import { CampaignAccessService } from "../access/campaign-access.service";
 import { getCampaignPoolUsageMap } from "../common/campaign-pool";
+import { UserRateLimiter } from "../common/user-rate-limit";
 import { InAppNotificationService } from "../notifications/in-app-notification.service";
 import { PrismaService } from "../prisma/prisma.service";
 import { RealtimeService } from "../realtime/realtime.service";
@@ -27,6 +30,8 @@ import {
   DEFAULT_CAMPAIGN_PLATFORM,
   normalizeCampaignPlatforms,
 } from "./campaign-platforms";
+import type { Env } from "../config/env";
+import { assertCampaignUrlsAllowed } from "./asset-url-rules";
 import type { CreateCampaignDto, UpdateCampaignDto } from "./dto/campaign.dto";
 import type { ListCampaignsQueryDto } from "./dto/list-campaigns-query.dto";
 
@@ -40,7 +45,13 @@ export class CampaignsService {
     private readonly realtime: RealtimeService,
     private readonly activityLog: ActivityLogService,
     private readonly notifications: InAppNotificationService,
+    @Optional() private readonly config?: ConfigService<Env, true>,
   ) {}
+
+  /** Our uploads' public base (R2); unset when files live on local disk. */
+  private storageBaseUrl(): string | undefined {
+    return this.config?.get("S3_PUBLIC_BASE_URL", { infer: true }) || undefined;
+  }
 
   // Fire-and-forget on purpose — a brand/admin publishing a campaign
   // shouldn't wait on N sequential push+WhatsApp sends before getting their
@@ -261,11 +272,16 @@ export class CampaignsService {
         );
     }
 
+    assertCampaignUrlsAllowed(dto, null, this.storageBaseUrl());
+
     if (isLive) {
       this.assertPublishable(
         { ...dto, locationType: dto.locationType ?? "pan_india" },
         { firstPublish: true },
       );
+      if (role === UserRole.brand) {
+        brandFirstPublishLimiter.consume(userId);
+      }
       if (ownership === CampaignOwnership.admin_created) {
         this.assertAdminCanPublish({
           ownership,
@@ -361,6 +377,8 @@ export class CampaignsService {
       await this.assertBrandProfileExists(dto.brandProfileId);
     }
 
+    assertCampaignUrlsAllowed(dto, existing, this.storageBaseUrl());
+
     const nextStatus = dto.status ?? existing.status;
     if (dto.status && dto.status !== existing.status) {
       this.assertStatusTransition(existing.status, dto.status);
@@ -393,6 +411,9 @@ export class CampaignsService {
         // didn't exist when it launched would strand older campaigns paused.
         { firstPublish: existing.status === CampaignStatus.draft },
       );
+      if (existing.status === CampaignStatus.draft && role === UserRole.brand) {
+        brandFirstPublishLimiter.consume(userId);
+      }
       const effectiveBrandProfileId =
         role === UserRole.admin && dto.brandProfileId !== undefined
           ? dto.brandProfileId
@@ -460,7 +481,13 @@ export class CampaignsService {
       existing.status !== CampaignStatus.live
     ) {
       this.realtime.emitCampaignPublished(formatted);
-      this.notifyCreatorsOfNewCampaign(formatted);
+      // Push + WhatsApp every creator only the first time a campaign goes
+      // live (draft → live — a campaign never returns to draft, so this can
+      // happen once). Resuming a paused campaign must not re-send a paid
+      // WhatsApp blast to everyone each time it's toggled.
+      if (existing.status === CampaignStatus.draft) {
+        this.notifyCreatorsOfNewCampaign(formatted);
+      }
     } else {
       this.realtime.emitCampaignUpdated(formatted);
     }
@@ -810,6 +837,10 @@ export class CampaignsService {
     return composed;
   }
 }
+
+/** Each first publish notifies every creator (push + paid WhatsApp), and
+ * anyone can sign up as a brand — cap how many a brand account can launch. */
+const brandFirstPublishLimiter = new UserRateLimiter(10, 60 * 60 * 1000);
 
 /** ₹1,000 — the same floor the website's Budget step enforces. */
 const MIN_PUBLISH_MAX_PAYOUT_PAISE = 100_000;
