@@ -1,11 +1,13 @@
-import { Injectable, InternalServerErrorException } from "@nestjs/common";
+import { BadRequestException, Injectable, InternalServerErrorException } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
+import { randomBytes } from "node:crypto";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import type { Env } from "../config/env";
+import { DIRECT_UPLOAD_CONTENT_TYPES, type DetectedFileType } from "../common/file-signature";
 import { ensureUploadDir, uploadFilename } from "../common/upload.util";
 
 export type PresignedUpload = {
@@ -38,6 +40,12 @@ export class ObjectStorageService {
           accessKeyId: this.config.get("S3_ACCESS_KEY_ID", { infer: true }),
           secretAccessKey: this.config.get("S3_SECRET_ACCESS_KEY", { infer: true }),
         },
+        // Newer AWS SDKs add a CRC32 checksum to every request by default —
+        // for a presigned PUT that's the checksum of an EMPTY body baked into
+        // the URL, so the browser's real upload can't match it. Cloudflare's
+        // R2 docs recommend only sending checksums when an operation needs one.
+        requestChecksumCalculation: "WHEN_REQUIRED",
+        responseChecksumValidation: "WHEN_REQUIRED",
       });
       return;
     }
@@ -74,6 +82,35 @@ export class ObjectStorageService {
     return this.saveToLocalDisk(folder, filename, file);
   }
 
+  /** Stores a file whose real type was already established from its bytes
+   * (see detectFileType). Both the stored extension and the Content-Type it
+   * is served with come from that detection — never from the uploader's file
+   * name or claimed MIME type — so a renamed .html/.svg can't ride in. */
+  async saveVerifiedFile(
+    folder: string,
+    buffer: Buffer,
+    detected: DetectedFileType,
+    originalname: string,
+  ): Promise<StoredUploadResult> {
+    const filename = `${Date.now()}-${randomBytes(8).toString("hex")}${detected.extension}`;
+    const key = `${folder}/${filename}`;
+
+    if (this.isR2Configured()) {
+      await this.uploadToR2(key, buffer, detected.mimeType);
+      return buildR2UploadResponse(
+        this.config.get("S3_PUBLIC_BASE_URL", { infer: true }),
+        key,
+        originalname,
+      );
+    }
+
+    return this.saveToLocalDisk(folder, filename, {
+      buffer,
+      originalname,
+      mimetype: detected.mimeType,
+    });
+  }
+
   /** A presigned URL the client PUTs the file bytes to directly — R2 never
    * passes through this server at all, so file size is bounded only by
    * R2's own single-PUT ceiling (5GB), not by how much this process can
@@ -90,7 +127,18 @@ export class ObjectStorageService {
       throw new InternalServerErrorException("Object storage is not configured");
     }
 
-    const filename = uploadFilename(originalFileName, contentType);
+    // The bytes never pass through this server on this path, so the type
+    // can't be sniffed — instead only known-safe types are signed, and the
+    // extension comes from that type, not the client's file name. R2 then
+    // serves the object with exactly this Content-Type.
+    const extension = DIRECT_UPLOAD_CONTENT_TYPES[contentType];
+    if (!extension) {
+      throw new BadRequestException({
+        code: "VALIDATION_ERROR",
+        message: "Only JPEG, PNG, WebP, GIF, MP4, MOV and WebM files can be uploaded",
+      });
+    }
+    const filename = `${Date.now()}-${randomBytes(8).toString("hex")}${extension}`;
     const key = `${folder}/${filename}`;
 
     // Cast: @aws-sdk/s3-request-presigner pulls in its own, slightly newer
@@ -109,7 +157,13 @@ export class ObjectStorageService {
         Key: key,
         ContentType: contentType,
       }),
-      { expiresIn: 3600 },
+      {
+        expiresIn: 3600,
+        // Sign the Content-Type too: otherwise the URL is only bound to the
+        // host, and whoever holds it could PUT the object as text/html and
+        // have our storage domain serve it as a web page.
+        signableHeaders: new Set(["content-type"]),
+      },
     );
 
     const { url: publicUrl } = buildR2UploadResponse(

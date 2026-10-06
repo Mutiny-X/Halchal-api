@@ -3,7 +3,7 @@ import {
   Injectable,
   NotFoundException,
 } from "@nestjs/common";
-import { CampaignOwnership, StaffAccessLevel, UserRole } from "@prisma/client";
+import { CampaignOwnership, CampaignStatus, StaffAccessLevel, UserRole } from "@prisma/client";
 
 import { PrismaService } from "../prisma/prisma.service";
 
@@ -64,6 +64,33 @@ export class CampaignAccessService {
       code: "FORBIDDEN",
       message: "No access to this campaign",
     });
+  }
+
+  /** Whether a socket may subscribe to a campaign's realtime room. Brand,
+   * staff and admin use the same rule as reading the campaign over HTTP;
+   * creators (the mobile app) may follow any campaign that has been
+   * published — never a draft. */
+  async canJoinCampaignRoom(
+    userId: string,
+    role: UserRole,
+    campaignId: string,
+  ): Promise<boolean> {
+    const campaign = await this.prisma.campaign.findUnique({
+      where: { id: campaignId },
+      select: { id: true, brandProfileId: true, ownership: true, status: true },
+    });
+    if (!campaign) return false;
+
+    if (role === UserRole.creator) {
+      return campaign.status !== CampaignStatus.draft;
+    }
+
+    try {
+      await this.assertCanAccessCampaign(userId, role, campaign);
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   async resolveBrandProfileIdForBrandCreate(

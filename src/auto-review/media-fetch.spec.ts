@@ -1,6 +1,12 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
+import { setSafeFetchResolverForTests } from "../common/safe-fetch";
 import { checkMediaUrlFetchable, fetchMedia } from "./media-fetch";
+
+// Hermetic DNS: every test host resolves to a public address, so these
+// specs never touch the network (the SSRF guard has its own spec).
+beforeAll(() => setSafeFetchResolverForTests(async () => ["93.184.216.34"]));
+afterAll(() => setSafeFetchResolverForTests(null));
 
 function makeResponse(opts: {
   ok?: boolean;

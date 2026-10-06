@@ -1,0 +1,266 @@
+import { BadRequestException, ForbiddenException, NotFoundException } from "@nestjs/common";
+import { CampaignOwnership, CampaignStatus, CampaignWizardStep, UserRole } from "@prisma/client";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+import { CampaignAccessService } from "../access/campaign-access.service";
+import { CampaignsService, countRulePoints, hasUsableSourceAsset } from "./campaigns.service";
+
+/** A campaign row with every publish requirement satisfied. */
+function completeDraft(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "camp-1",
+    brandProfileId: "brand-1",
+    ownership: CampaignOwnership.brand_created,
+    wizardStep: CampaignWizardStep.review,
+    inviteAcceptedAt: null,
+    createdByUserId: "user-brand",
+    title: "Summer drop",
+    category: "Fashion",
+    platform: "instagram_reel",
+    platforms: ["instagram_reel"],
+    locationType: "pan_india",
+    targetStates: [],
+    status: CampaignStatus.draft,
+    brief: "HOOK:\nShow the drop",
+    briefHook: "Show the drop",
+    doRules: "Show the product\nTag the brand",
+    avoidRules: "No competitor logos",
+    sourceAssets: [{ type: "drive", url: "https://drive.google.com/file/d/abc/view" }],
+    sourceVideoRequirement: "mandatory",
+    sourceAudioRequirement: "not_required",
+    autoReviewEnabled: true,
+    referenceAssets: [],
+    coverImageUrl: null,
+    productUrl: null,
+    ratePer1kPaise: 5_000,
+    maxPayoutPaise: 5_000_000,
+    budgetPaise: 10_000_000,
+    budgetUsedPaise: 0,
+    startDate: null,
+    createdAt: new Date("2026-10-01"),
+    updatedAt: new Date("2026-10-01"),
+    ...overrides,
+  };
+}
+
+function setup() {
+  const prisma = {
+    campaign: {
+      findUnique: vi.fn(),
+      update: vi.fn(),
+      create: vi.fn(),
+      count: vi.fn().mockResolvedValue(0),
+      findMany: vi.fn().mockResolvedValue([]),
+    },
+    brandProfile: { findUnique: vi.fn() },
+    staffBrandAssignment: { findUnique: vi.fn(), findMany: vi.fn().mockResolvedValue([]) },
+    user: { findMany: vi.fn().mockResolvedValue([]) },
+    $transaction: vi.fn(async (ops: unknown[]) => Promise.all(ops)),
+    $queryRaw: vi.fn().mockResolvedValue([]),
+  };
+  const access = new CampaignAccessService(prisma as never);
+  const realtime = {
+    emitCampaignCreated: vi.fn(),
+    emitCampaignUpdated: vi.fn(),
+    emitCampaignPublished: vi.fn(),
+  };
+  const activityLog = { log: vi.fn().mockResolvedValue(undefined) };
+  const notifications = { create: vi.fn().mockResolvedValue(undefined) };
+  const service = new CampaignsService(
+    prisma as never,
+    access,
+    realtime as never,
+    activityLog as never,
+    notifications as never,
+  );
+  // update() echoes what was written, like Prisma does.
+  prisma.campaign.update.mockImplementation(async ({ data }: { data: Record<string, unknown> }) => ({
+    ...completeDraft(),
+    ...Object.fromEntries(Object.entries(data).filter(([, v]) => v !== undefined)),
+  }));
+  prisma.campaign.create.mockImplementation(async ({ data }: { data: Record<string, unknown> }) => ({
+    ...completeDraft(),
+    ...data,
+  }));
+  return { prisma, service, realtime };
+}
+
+async function expectValidationError(promise: Promise<unknown>, message: RegExp) {
+  await expect(promise).rejects.toBeInstanceOf(BadRequestException);
+  await promise.catch((e: BadRequestException) => {
+    expect((e.getResponse() as { message: string }).message).toMatch(message);
+  });
+}
+
+describe("campaign list scoping (fail closed)", () => {
+  it("a brand user with no BrandProfile sees nothing, never every brand's campaigns", async () => {
+    const { prisma, service } = setup();
+    prisma.brandProfile.findUnique.mockResolvedValue(null);
+
+    await service.listForUser("orphan-brand-user", UserRole.brand, { page: 1, limit: 6 });
+
+    const where = prisma.campaign.count.mock.calls[0][0].where;
+    expect(where).toMatchObject({ id: "__none__" });
+    expect(prisma.campaign.findMany.mock.calls[0][0].where).toEqual(where);
+  });
+
+  it("a brand user sees only its own brand's campaigns", async () => {
+    const { prisma, service } = setup();
+    prisma.brandProfile.findUnique.mockResolvedValue({ id: "brand-1" });
+
+    await service.listForUser("user-brand", UserRole.brand, { page: 1, limit: 6 });
+
+    expect(prisma.campaign.count.mock.calls[0][0].where).toMatchObject({ brandProfileId: "brand-1" });
+  });
+
+  it("staff see only their assigned brands", async () => {
+    const { prisma, service } = setup();
+    prisma.staffBrandAssignment.findMany.mockResolvedValue([{ brandProfileId: "b1" }, { brandProfileId: "b2" }]);
+
+    await service.listForUser("staff-1", UserRole.staff, { page: 1, limit: 6 });
+
+    expect(prisma.campaign.count.mock.calls[0][0].where).toMatchObject({ brandProfileId: { in: ["b1", "b2"] } });
+  });
+
+  it("admins are unscoped, and the status/search filters still apply", async () => {
+    const { prisma, service } = setup();
+
+    await service.listForUser("admin-1", UserRole.admin, { page: 1, limit: 6, status: CampaignStatus.live, search: " drop " });
+
+    expect(prisma.campaign.count.mock.calls[0][0].where).toEqual({
+      status: CampaignStatus.live,
+      title: { contains: "drop", mode: "insensitive" },
+    });
+  });
+});
+
+describe("campaign owner checks on create", () => {
+  it("staff must name a brand", async () => {
+    const { service } = setup();
+    await expectValidationError(
+      service.create("staff-1", UserRole.staff, { title: "x" } as never),
+      /Choose a brand/,
+    );
+  });
+
+  it("staff can't create for a brand they aren't assigned to", async () => {
+    const { prisma, service } = setup();
+    prisma.staffBrandAssignment.findUnique.mockResolvedValue(null);
+    await expect(
+      service.create("staff-1", UserRole.staff, { title: "x", brandProfileId: "brand-9" } as never),
+    ).rejects.toBeInstanceOf(ForbiddenException);
+  });
+
+  it("view-only staff can't create", async () => {
+    const { prisma, service } = setup();
+    prisma.staffBrandAssignment.findUnique.mockResolvedValue({ accessLevel: "view_only" });
+    await expect(
+      service.create("staff-1", UserRole.staff, { title: "x", brandProfileId: "brand-1" } as never),
+    ).rejects.toBeInstanceOf(ForbiddenException);
+  });
+
+  it("an admin naming a brand that doesn't exist gets 404, not a database error", async () => {
+    const { prisma, service } = setup();
+    prisma.brandProfile.findUnique.mockResolvedValue(null);
+    await expect(
+      service.create("admin-1", UserRole.admin, { title: "x", brandProfileId: "nope" } as never),
+    ).rejects.toBeInstanceOf(NotFoundException);
+    expect(prisma.campaign.create).not.toHaveBeenCalled();
+  });
+
+  it("an admin reassigning a campaign to a brand that doesn't exist gets 404", async () => {
+    const { prisma, service } = setup();
+    prisma.campaign.findUnique.mockResolvedValue(completeDraft());
+    prisma.brandProfile.findUnique.mockResolvedValue(null);
+    await expect(
+      service.update("admin-1", UserRole.admin, "camp-1", { brandProfileId: "nope" } as never),
+    ).rejects.toBeInstanceOf(NotFoundException);
+    expect(prisma.campaign.update).not.toHaveBeenCalled();
+  });
+});
+
+describe("server-side publish rules", () => {
+  let ctx: ReturnType<typeof setup>;
+  beforeEach(() => {
+    ctx = setup();
+    ctx.prisma.brandProfile.findUnique.mockResolvedValue({ id: "brand-1" });
+  });
+
+  const publish = (existing: Record<string, unknown>, dto: Record<string, unknown> = {}) => {
+    ctx.prisma.campaign.findUnique.mockResolvedValue(completeDraft(existing));
+    return ctx.service.update("user-brand", UserRole.brand, "camp-1", { status: CampaignStatus.live, ...dto } as never);
+  };
+
+  it("publishes a complete draft and announces it", async () => {
+    await publish({});
+    expect(ctx.prisma.campaign.update).toHaveBeenCalled();
+    expect(ctx.realtime.emitCampaignPublished).toHaveBeenCalled();
+  });
+
+  it.each([
+    ["an empty title", { title: "  " }, /title is required/],
+    ["no creative brief", { briefHook: "" }, /Creative brief is required/],
+    ["no Do points", { doRules: " \n - \n" }, /'Do' point/],
+    ["no Avoid points", { avoidRules: null }, /'Avoid' point/],
+    ["no source assets", { sourceAssets: [] }, /source asset/],
+    ["only blank source asset URLs", { sourceAssets: [{ type: "drive", url: "  " }] }, /source asset/],
+    ["state targeting with no states", { locationType: "states", targetStates: [] }, /target state/],
+    ["max payout under ₹1,000", { maxPayoutPaise: 99_999, budgetPaise: 10_000_000 }, /at least ₹1,000/],
+    ["budget below max payout", { maxPayoutPaise: 5_000_000, budgetPaise: 4_999_999 }, /budget must be at least the max payout/],
+  ])("refuses a first publish with %s", async (_label, existing, message) => {
+    await expectValidationError(publish(existing), message);
+    expect(ctx.prisma.campaign.update).not.toHaveBeenCalled();
+  });
+
+  it("checks the values being sent in the same request, not just what's stored", async () => {
+    // Stored draft is complete, but this request clears the Do rules while publishing.
+    await expectValidationError(publish({}, { doRules: "" }), /'Do' point/);
+  });
+
+  it("accepts the request's own fixes in the same publish call", async () => {
+    await publish({ doRules: null }, { doRules: "Show the product" });
+    expect(ctx.prisma.campaign.update).toHaveBeenCalled();
+  });
+
+  it("lets a paused campaign resume even if it predates the newer content rules", async () => {
+    await publish({ status: CampaignStatus.paused, doRules: null, avoidRules: null, sourceAssets: [] });
+    expect(ctx.prisma.campaign.update).toHaveBeenCalled();
+  });
+
+  it("applies the same rules when a campaign is created straight into live", async () => {
+    await expectValidationError(
+      ctx.service.create("user-brand", UserRole.brand, {
+        title: "Direct",
+        status: CampaignStatus.live,
+        briefHook: "Hook",
+        doRules: "Do this",
+        avoidRules: "Avoid that",
+        ratePer1kPaise: 5_000,
+        maxPayoutPaise: 5_000_000,
+        budgetPaise: 10_000_000,
+      } as never),
+      /source asset/,
+    );
+    expect(ctx.prisma.campaign.create).not.toHaveBeenCalled();
+  });
+
+  it("doesn't apply publish rules to ordinary draft saves", async () => {
+    ctx.prisma.campaign.findUnique.mockResolvedValue(completeDraft({ doRules: null, sourceAssets: [] }));
+    await ctx.service.update("user-brand", UserRole.brand, "camp-1", { title: "Half written" } as never);
+    expect(ctx.prisma.campaign.update).toHaveBeenCalled();
+  });
+});
+
+describe("publish-rule helpers", () => {
+  it("countRulePoints matches the website's bullet parsing", () => {
+    expect(countRulePoints("- Show product\n• Use natural light\n\n  \nAvoid shaky cam")).toBe(3);
+    expect(countRulePoints(" - \n•\n")).toBe(0);
+    expect(countRulePoints(null)).toBe(0);
+  });
+
+  it("hasUsableSourceAsset ignores malformed entries", () => {
+    expect(hasUsableSourceAsset([{ url: "https://x" }])).toBe(true);
+    expect(hasUsableSourceAsset([{ url: "" }, null, "x", { url: 5 }])).toBe(false);
+    expect(hasUsableSourceAsset({ url: "https://x" })).toBe(false);
+  });
+});

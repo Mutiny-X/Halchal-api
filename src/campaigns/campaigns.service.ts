@@ -136,11 +136,22 @@ export class CampaignsService {
     const limit = query.limit ?? 6;
     const skip = (page - 1) * limit;
 
+    // Fail closed: a brand user with no BrandProfile row (or any role other
+    // than admin/brand/staff) must see nothing — never fall through to an
+    // unfiltered query over every brand's campaigns.
+    const scope: Prisma.CampaignWhereInput =
+      role === UserRole.admin
+        ? {}
+        : role === UserRole.staff && staffBrandIds
+          ? { brandProfileId: { in: staffBrandIds } }
+          : role === UserRole.brand && brandProfileId
+            ? { brandProfileId }
+            : { id: "__none__" };
+
     const where: Prisma.CampaignWhereInput = {
       ...(query.status ? { status: query.status } : {}),
       ...(query.search?.trim() ? { title: { contains: query.search.trim(), mode: "insensitive" } } : {}),
-      ...(role === UserRole.brand && brandProfileId ? { brandProfileId } : {}),
-      ...(role === UserRole.staff && staffBrandIds ? { brandProfileId: { in: staffBrandIds } } : {}),
+      ...scope,
     };
 
     const [total, campaigns] = await this.prisma.$transaction([
@@ -217,21 +228,30 @@ export class CampaignsService {
     if (role === UserRole.admin) {
       ownership = CampaignOwnership.admin_created;
       brandProfileId = dto.brandProfileId ?? null;
-    } else if (role === UserRole.staff) {
-      brandProfileId = dto.brandProfileId ?? null;
       if (brandProfileId) {
-        const assignment = await this.prisma.staffBrandAssignment.findUnique({
-          where: { staffUserId_brandProfileId: { staffUserId: userId, brandProfileId } },
+        await this.assertBrandProfileExists(brandProfileId);
+      }
+    } else if (role === UserRole.staff) {
+      // Staff only ever work inside an assigned brand — a campaign with no
+      // brand would be unreachable for them (and every other non-admin).
+      if (!dto.brandProfileId) {
+        throw new BadRequestException({
+          code: "VALIDATION_ERROR",
+          message: "Choose a brand to create this campaign for",
         });
-        if (!assignment) {
-          throw new ForbiddenException({ code: "FORBIDDEN", message: "Not assigned to this brand" });
-        }
-        if (assignment.accessLevel !== StaffAccessLevel.full) {
-          throw new ForbiddenException({
-            code: "FORBIDDEN",
-            message: "View-only access — cannot create campaigns for this brand",
-          });
-        }
+      }
+      brandProfileId = dto.brandProfileId;
+      const assignment = await this.prisma.staffBrandAssignment.findUnique({
+        where: { staffUserId_brandProfileId: { staffUserId: userId, brandProfileId } },
+      });
+      if (!assignment) {
+        throw new ForbiddenException({ code: "FORBIDDEN", message: "Not assigned to this brand" });
+      }
+      if (assignment.accessLevel !== StaffAccessLevel.full) {
+        throw new ForbiddenException({
+          code: "FORBIDDEN",
+          message: "View-only access — cannot create campaigns for this brand",
+        });
       }
     } else {
       brandProfileId =
@@ -242,7 +262,10 @@ export class CampaignsService {
     }
 
     if (isLive) {
-      this.assertPublishable(dto);
+      this.assertPublishable(
+        { ...dto, locationType: dto.locationType ?? "pan_india" },
+        { firstPublish: true },
+      );
       if (ownership === CampaignOwnership.admin_created) {
         this.assertAdminCanPublish({
           ownership,
@@ -334,6 +357,10 @@ export class CampaignsService {
       { requireWrite: true },
     );
 
+    if (role === UserRole.admin && dto.brandProfileId) {
+      await this.assertBrandProfileExists(dto.brandProfileId);
+    }
+
     const nextStatus = dto.status ?? existing.status;
     if (dto.status && dto.status !== existing.status) {
       this.assertStatusTransition(existing.status, dto.status);
@@ -343,14 +370,29 @@ export class CampaignsService {
       nextStatus === CampaignStatus.live &&
       existing.status !== CampaignStatus.live
     ) {
-      this.assertPublishable({
-        title: dto.title ?? existing.title,
-        briefHook: dto.briefHook ?? existing.briefHook ?? undefined,
-        ratePer1kPaise: dto.ratePer1kPaise ?? existing.ratePer1kPaise,
-        maxPayoutPaise: dto.maxPayoutPaise ?? existing.maxPayoutPaise,
-        budgetPaise: dto.budgetPaise ?? existing.budgetPaise,
-        brief: dto.brief ?? existing.brief,
-      });
+      const nextLocationType = dto.locationType ?? existing.locationType;
+      this.assertPublishable(
+        {
+          title: dto.title ?? existing.title,
+          briefHook: dto.briefHook ?? existing.briefHook ?? undefined,
+          doRules: dto.doRules ?? existing.doRules ?? undefined,
+          avoidRules: dto.avoidRules ?? existing.avoidRules ?? undefined,
+          locationType: nextLocationType,
+          targetStates:
+            nextLocationType === "pan_india"
+              ? []
+              : (dto.targetStates ?? existing.targetStates),
+          sourceAssets: dto.sourceAssets ?? existing.sourceAssets,
+          ratePer1kPaise: dto.ratePer1kPaise ?? existing.ratePer1kPaise,
+          maxPayoutPaise: dto.maxPayoutPaise ?? existing.maxPayoutPaise,
+          budgetPaise: dto.budgetPaise ?? existing.budgetPaise,
+          brief: dto.brief ?? existing.brief,
+        },
+        // Full content rules apply to a first publish only. A paused
+        // campaign was already live once — re-checking it against rules that
+        // didn't exist when it launched would strand older campaigns paused.
+        { firstPublish: existing.status === CampaignStatus.draft },
+      );
       const effectiveBrandProfileId =
         role === UserRole.admin && dto.brandProfileId !== undefined
           ? dto.brandProfileId
@@ -465,6 +507,19 @@ export class CampaignsService {
     return { deleted: true, id: campaignId };
   }
 
+  private async assertBrandProfileExists(brandProfileId: string): Promise<void> {
+    const brand = await this.prisma.brandProfile.findUnique({
+      where: { id: brandProfileId },
+      select: { id: true },
+    });
+    if (!brand) {
+      throw new NotFoundException({
+        code: "NOT_FOUND",
+        message: "Brand not found",
+      });
+    }
+  }
+
   private assertAdminCanPublish(campaign: {
     ownership?: CampaignOwnership;
     brandProfileId: string | null;
@@ -519,31 +574,67 @@ export class CampaignsService {
     }
   }
 
-  private assertPublishable(input: {
-    title?: string;
-    briefHook?: string;
-    ratePer1kPaise?: number;
-    maxPayoutPaise?: number;
-    budgetPaise?: number;
-    brief?: string;
-  }): void {
+  /**
+   * Server-side publish gate. On a first publish (draft → live, or creating
+   * straight into live) it enforces the same completeness rules the website's
+   * wizard checks — the website is not the guard, since anyone can call this
+   * API directly. A paused campaign resuming only re-checks commercials.
+   */
+  private assertPublishable(
+    input: {
+      title?: string;
+      briefHook?: string;
+      doRules?: string;
+      avoidRules?: string;
+      locationType?: string;
+      targetStates?: string[];
+      sourceAssets?: unknown;
+      ratePer1kPaise?: number;
+      maxPayoutPaise?: number;
+      budgetPaise?: number;
+      brief?: string;
+    },
+    opts: { firstPublish: boolean },
+  ): void {
+    const fail = (message: string): never => {
+      throw new BadRequestException({ code: "VALIDATION_ERROR", message });
+    };
+
     if (!input.ratePer1kPaise || input.ratePer1kPaise < 1) {
-      throw new BadRequestException({
-        code: "VALIDATION_ERROR",
-        message: "Rate per 1K views is required to publish",
-      });
+      fail("Rate per 1K views is required to publish");
     }
     if (!input.maxPayoutPaise || input.maxPayoutPaise < 100) {
-      throw new BadRequestException({
-        code: "VALIDATION_ERROR",
-        message: "Max payout is required to publish",
-      });
+      fail("Max payout is required to publish");
     }
     if (!input.budgetPaise || input.budgetPaise < 100) {
-      throw new BadRequestException({
-        code: "VALIDATION_ERROR",
-        message: "Campaign budget is required to publish",
-      });
+      fail("Campaign budget is required to publish");
+    }
+
+    if (!opts.firstPublish) return;
+
+    if (!input.title?.trim()) {
+      fail("Campaign title is required to publish");
+    }
+    if (input.locationType === "states" && !input.targetStates?.length) {
+      fail("Choose at least one target state, or switch to Pan India");
+    }
+    if (!input.briefHook?.trim()) {
+      fail("Creative brief is required to publish");
+    }
+    if (countRulePoints(input.doRules) === 0) {
+      fail("Add at least one 'Do' point before publishing");
+    }
+    if (countRulePoints(input.avoidRules) === 0) {
+      fail("Add at least one 'Avoid' point before publishing");
+    }
+    if (!hasUsableSourceAsset(input.sourceAssets)) {
+      fail("Add at least one source asset before publishing");
+    }
+    if (input.maxPayoutPaise! < MIN_PUBLISH_MAX_PAYOUT_PAISE) {
+      fail("Max payout per creator must be at least ₹1,000");
+    }
+    if (input.budgetPaise! < input.maxPayoutPaise!) {
+      fail("Campaign budget must be at least the max payout per creator");
     }
   }
 
@@ -720,3 +811,28 @@ export class CampaignsService {
   }
 }
 
+/** ₹1,000 — the same floor the website's Budget step enforces. */
+const MIN_PUBLISH_MAX_PAYOUT_PAISE = 100_000;
+
+/** Mirrors the website's parseRulePoints(): one point per non-empty line,
+ * ignoring leading bullet characters. */
+export function countRulePoints(value: string | null | undefined): number {
+  if (!value?.trim()) return 0;
+  return value
+    .split(/\r?\n/)
+    .map((line) => line.replace(/^[\s•\-–*]+/, "").trim())
+    .filter(Boolean).length;
+}
+
+export function hasUsableSourceAsset(raw: unknown): boolean {
+  return (
+    Array.isArray(raw) &&
+    raw.some(
+      (item) =>
+        typeof item === "object" &&
+        item !== null &&
+        typeof (item as { url?: unknown }).url === "string" &&
+        (item as { url: string }).url.trim().length > 0,
+    )
+  );
+}
