@@ -31,7 +31,9 @@ import {
   normalizeCampaignPlatforms,
 } from "./campaign-platforms";
 import type { Env } from "../config/env";
+import { ObjectStorageService } from "../storage/object-storage.service";
 import { assertCampaignUrlsAllowed } from "./asset-url-rules";
+import { campaignFileUrls } from "./campaign-files";
 import { parseStartDay, startDateProblem } from "./start-date-rules";
 import type { CreateCampaignDto, UpdateCampaignDto } from "./dto/campaign.dto";
 import type { ListCampaignsQueryDto } from "./dto/list-campaigns-query.dto";
@@ -47,7 +49,38 @@ export class CampaignsService {
     private readonly activityLog: ActivityLogService,
     private readonly notifications: InAppNotificationService,
     @Optional() private readonly config?: ConfigService<Env, true>,
+    @Optional() private readonly storage?: ObjectStorageService,
   ) {}
+
+  /**
+   * Deletes stored campaign files that no campaign uses any more. Runs AFTER
+   * the database change has committed, so a failed delete/update never
+   * loses files. A file still referenced by any campaign (one URL can appear
+   * in more than one) is kept. Storage errors are logged, never thrown — the
+   * campaign change itself has already succeeded.
+   */
+  private async removeUnusedCampaignFiles(urls: string[], context: string): Promise<void> {
+    if (!this.storage || urls.length === 0) return;
+    for (const url of urls) {
+      try {
+        const stillUsed = await this.prisma.campaign.count({
+          where: {
+            OR: [
+              { coverImageUrl: url },
+              { referenceAssets: { array_contains: [{ url }] } },
+              { sourceAssets: { array_contains: [{ url }] } },
+            ],
+          },
+        });
+        if (stillUsed > 0) continue;
+        if (await this.storage.deleteCampaignFile(url)) {
+          this.logger.log(`Deleted campaign file (${context}): ${url}`);
+        }
+      } catch (error) {
+        this.logger.warn(`Couldn't delete campaign file ${url} (${context}): ${error}`);
+      }
+    }
+  }
 
   /** Our uploads' public base (R2); unset when files live on local disk. */
   private storageBaseUrl(): string | undefined {
@@ -492,6 +525,14 @@ export class CampaignsService {
       },
     });
 
+    // A replaced cover or a removed sample/source file is no longer used by
+    // this campaign — delete it from storage (if no other campaign uses it).
+    const keptUrls = new Set(campaignFileUrls(campaign));
+    await this.removeUnusedCampaignFiles(
+      campaignFileUrls(existing).filter((url) => !keptUrls.has(url)),
+      `campaign ${campaignId} edited`,
+    );
+
     const formatted = this.formatCampaign(campaign);
     if (
       nextStatus === CampaignStatus.live &&
@@ -514,7 +555,7 @@ export class CampaignsService {
   async remove(userId: string, role: UserRole, campaignId: string) {
     const existing = await this.prisma.campaign.findUnique({
       where: { id: campaignId },
-      include: { _count: { select: { submissions: true } } },
+      include: { _count: { select: { submissions: true, participations: true } } },
     });
     if (!existing) {
       throw new NotFoundException({
@@ -546,8 +587,19 @@ export class CampaignsService {
         message: "Cannot delete a campaign that has creator submissions",
       });
     }
+    // Participations and their deliverables cascade-delete with a campaign —
+    // that would silently erase creators' work and payout history. Once any
+    // creator has joined, the campaign can be closed but never deleted.
+    if (existing._count.participations > 0) {
+      throw new BadRequestException({
+        code: "VALIDATION_ERROR",
+        message: "Creators have joined this campaign, so it can't be deleted. Close it instead to keep their work and payout history.",
+      });
+    }
 
     await this.prisma.campaign.delete({ where: { id: campaignId } });
+    // Then everything it stored: cover, sample content, uploaded source files.
+    await this.removeUnusedCampaignFiles(campaignFileUrls(existing), `campaign ${campaignId} deleted`);
     return { deleted: true, id: campaignId };
   }
 

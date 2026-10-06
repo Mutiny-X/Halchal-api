@@ -11,6 +11,7 @@ import {
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { randomBytes } from "node:crypto";
 import { writeFileSync } from "node:fs";
+import { unlink } from "node:fs/promises";
 import { join } from "node:path";
 
 import type { Env } from "../config/env";
@@ -273,6 +274,31 @@ export class ObjectStorageService {
     await client.send(new DeleteObjectCommand({ Bucket: this.bucket(), Key: key }));
   }
 
+  /**
+   * Deletes one campaign file given the URL stored on a campaign. Only keys
+   * in the campaign folders are ever touched — a URL pointing anywhere else
+   * (another folder such as avatars or KYC documents, another host, a Drive
+   * link) is ignored and returns false. Missing files count as deleted.
+   */
+  async deleteCampaignFile(url: string): Promise<boolean> {
+    const value = url.trim();
+    const local = LOCAL_CAMPAIGN_FILE.exec(value);
+    if (local) {
+      await unlink(join(process.cwd(), "uploads", local[1], local[2])).catch((error: NodeJS.ErrnoException) => {
+        if (error.code !== "ENOENT") throw error;
+      });
+      return true;
+    }
+    if (!this.isR2Configured()) return false;
+    const base = (this.config.get("S3_PUBLIC_BASE_URL", { infer: true }) ?? "").replace(/\/$/, "");
+    if (!base) return false;
+    if (!value.startsWith(`${base}/`)) return false;
+    const key = decodeURIComponent(value.slice(base.length + 1).split(/[?#]/)[0]);
+    if (!CAMPAIGN_FILE_KEY.test(key)) return false;
+    await this.deleteObject(key);
+    return true;
+  }
+
   publicUrlFor(key: string): string {
     return buildR2UploadResponse(this.config.get("S3_PUBLIC_BASE_URL", { infer: true }), key, key).url;
   }
@@ -318,6 +344,10 @@ export class ObjectStorageService {
     };
   }
 }
+
+/** Campaign files: covers, sample content and uploaded source files. */
+const CAMPAIGN_FILE_KEY = /^(cover-images|reference-assets)\/[A-Za-z0-9_-][A-Za-z0-9._-]*$/;
+const LOCAL_CAMPAIGN_FILE = /^\/uploads\/(cover-images|reference-assets)\/([A-Za-z0-9_-][A-Za-z0-9._-]*)$/;
 
 export function buildR2UploadResponse(
   publicBaseUrl: string,
