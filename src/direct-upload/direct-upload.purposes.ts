@@ -58,8 +58,9 @@ export const DIRECT_UPLOAD_RULES: Record<DirectUploadPurpose, DirectUploadRule> 
     folder: "reference-assets",
     roles: [UserRole.brand, UserRole.staff, UserRole.admin],
     contentTypes: [...IMAGE_TYPES, ...VIDEO_TYPES],
-    // R2's single-PUT ceiling.
-    maxBytes: 5 * 1024 * MB,
+    // R2 caps a single PUT at 4.995 GiB — stay safely under it (and under
+    // the 5 GiB single CopyObject limit used to move it into place).
+    maxBytes: Math.floor(4.9 * 1024 * MB),
     checkVideoPlayable: true,
     needsDeliverable: false,
   },

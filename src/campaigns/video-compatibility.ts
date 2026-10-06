@@ -1,8 +1,12 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { createServer, type Server } from "node:http";
+import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Readable } from "node:stream";
+import type { ReadableStream as WebReadableStream } from "node:stream/web";
 
 import ffprobePath from "@ffprobe-installer/ffprobe";
 
@@ -75,8 +79,13 @@ function probe(input: string, timeoutMs = 45_000): Promise<ProbeStream[]> {
       reject(new VideoProbeUnavailableError(`ffprobe could not start: ${err.message}`));
     });
 
-    proc.on("close", (code) => {
+    proc.on("close", (code, signal) => {
       clearTimeout(timer);
+      if (signal) {
+        // Killed or crashed — never a verdict on the file.
+        reject(new VideoProbeUnavailableError(`ffprobe stopped by ${signal}${stderr ? `: ${stderr.trim().slice(0, 300)}` : ""}`));
+        return;
+      }
       if (code !== 0) {
         reject(probeFailure(stderr));
         return;
@@ -115,7 +124,117 @@ export async function assertVideoIsPlayable(buffer: Buffer): Promise<void> {
  * itself can't run (callers decide whether that blocks the upload).
  */
 export async function assertRemoteVideoIsPlayable(signedUrl: string): Promise<void> {
-  assertPlayableStreams(await probe(signedUrl));
+  const relay = await startRangeRelay(signedUrl);
+  try {
+    assertPlayableStreams(await probeThroughRelay(relay));
+  } finally {
+    await relay.close();
+  }
+}
+
+type Relay = Awaited<ReturnType<typeof startRangeRelay>>;
+
+/** If storage misbehaved or the byte cap was hit, ffprobe saw a partial
+ * file — whatever it concluded says nothing about the real video. */
+async function probeThroughRelay(relay: Relay): Promise<ProbeStream[]> {
+  try {
+    return await probe(relay.url);
+  } catch (error) {
+    if (relay.problem()) throw new VideoProbeUnavailableError(`storage read failed: ${relay.problem()}`);
+    throw error;
+  }
+}
+
+/** Most bytes one probe may pull through the relay. ffprobe only reads the
+ * container headers (plus the index, which can sit at the end of an MP4),
+ * so a few MB is normal; this just bounds a pathological file. */
+export const MAX_PROBE_BYTES = 64 * 1024 * 1024;
+
+/**
+ * ffprobe never opens the storage URL itself: the static ffprobe build
+ * crashes (SIGSEGV) on any network address inside Railway's containers, as
+ * its built-in DNS lookup can't cope there. Instead it reads from this
+ * loopback relay — Node does the DNS and TLS, and passes through only the
+ * byte ranges ffprobe asks for, streaming, so a multi-GB video isn't
+ * downloaded to probe its headers.
+ */
+async function startRangeRelay(
+  sourceUrl: string,
+  maxBytes = MAX_PROBE_BYTES,
+): Promise<{ url: string; close: () => Promise<void>; bytesRelayed: () => number; problem: () => string | null }> {
+  let relayed = 0;
+  let problem: string | null = null;
+  const upstreams = new Set<AbortController>();
+  const server: Server = createServer(async (req, res) => {
+    const abort = new AbortController();
+    upstreams.add(abort);
+    res.on("close", () => {
+      abort.abort();
+      upstreams.delete(abort);
+    });
+    try {
+      if (relayed >= maxBytes) {
+        problem ??= `probe read more than ${maxBytes} bytes`;
+        res.writeHead(416).end();
+        return;
+      }
+      const upstream = await fetch(sourceUrl, {
+        method: req.method === "HEAD" ? "HEAD" : "GET",
+        headers: req.headers.range ? { range: req.headers.range } : {},
+        signal: abort.signal,
+      });
+      const headers: Record<string, string> = { "accept-ranges": "bytes" };
+      for (const name of ["content-type", "content-length", "content-range"]) {
+        const value = upstream.headers.get(name);
+        if (value) headers[name] = value;
+      }
+      if (upstream.status >= 400) problem ??= `storage answered ${upstream.status}`;
+      res.writeHead(upstream.status, headers);
+      if (!upstream.body || req.method === "HEAD") {
+        res.end();
+        return;
+      }
+      const body = Readable.fromWeb(upstream.body as unknown as WebReadableStream);
+      body.on("data", (chunk: Buffer) => {
+        relayed += chunk.length;
+        if (relayed > maxBytes) {
+          problem ??= `probe read more than ${maxBytes} bytes`;
+          body.destroy();
+          res.destroy();
+        }
+      });
+      body.on("error", () => res.destroy());
+      body.pipe(res);
+    } catch (error) {
+      if (!abort.signal.aborted) problem ??= `storage request failed: ${(error as Error).message}`;
+      if (!res.headersSent) res.writeHead(502);
+      res.end();
+    }
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address() as AddressInfo;
+  return {
+    url: `http://127.0.0.1:${port}/video`,
+    bytesRelayed: () => relayed,
+    problem: () => problem,
+    close: () =>
+      new Promise<void>((resolve) => {
+        for (const a of upstreams) a.abort();
+        server.closeAllConnections?.();
+        server.close(() => resolve());
+      }),
+  };
+}
+
+/** For tests: probe through the relay and report how much was transferred. */
+export async function probeRemoteForTest(signedUrl: string, maxBytes?: number) {
+  const relay = await startRangeRelay(signedUrl, maxBytes);
+  try {
+    const streams = await probeThroughRelay(relay);
+    return { streams, bytes: relay.bytesRelayed() };
+  } finally {
+    await relay.close();
+  }
 }
 
 function assertPlayableStreams(streams: ProbeStream[]): void {

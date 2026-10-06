@@ -6,6 +6,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   assertRemoteVideoIsPlayable,
   probeFailure,
+  probeRemoteForTest,
   UnsupportedVideoFormatError,
   VideoProbeUnavailableError,
 } from "./video-compatibility";
@@ -36,6 +37,8 @@ describe("classifying ffprobe failures", () => {
 
 describe("real ffprobe over HTTP (like a signed R2 URL)", () => {
   let server: Server;
+  const HUGE_PADDING = 200 * 1024 * 1024;
+  let hugeServed = 0;
   let base = "";
   const video = readFileSync(FIXTURE);
   const corrupt = Buffer.concat([Buffer.from([0, 0, 0, 0x18]), Buffer.from("ftypmp42"), Buffer.alloc(4000, 7)]);
@@ -44,6 +47,31 @@ describe("real ffprobe over HTTP (like a signed R2 URL)", () => {
     server = createServer((req, res) => {
       if (req.url === "/400") return res.writeHead(400, { "Content-Type": "application/xml" }).end("<Error><Code>InvalidArgument</Code></Error>");
       if (req.url === "/401") return res.writeHead(401).end("Unauthorized");
+      if (req.url === "/huge.mp4") {
+        // A valid video followed by ~200 MB, served with Range support like R2.
+        const total = video.length + HUGE_PADDING;
+        const m = /bytes=(\d+)-(\d*)/.exec(req.headers.range ?? "");
+        const start = m ? Number(m[1]) : 0;
+        const end = m && m[2] ? Math.min(Number(m[2]), total - 1) : total - 1;
+        res.writeHead(m ? 206 : 200, {
+          "Content-Type": "video/mp4",
+          "Content-Length": end - start + 1,
+          "Accept-Ranges": "bytes",
+          ...(m ? { "Content-Range": `bytes ${start}-${end}/${total}` } : {}),
+        });
+        let pos = start;
+        const pump = () => {
+          while (pos <= end) {
+            const chunk = pos < video.length ? video.subarray(pos, Math.min(video.length, end + 1)) : Buffer.alloc(Math.min(65536, end - pos + 1));
+            pos += chunk.length;
+            hugeServed += chunk.length;
+            if (!res.write(chunk)) return void res.once("drain", pump);
+          }
+          res.end();
+        };
+        res.on("close", () => (pos = end + 1));
+        return pump();
+      }
       const body = req.url === "/good.mp4" ? video : corrupt;
       res.writeHead(200, { "Content-Type": "video/mp4", "Content-Length": body.length, "Accept-Ranges": "bytes" }).end(body);
     });
@@ -60,6 +88,17 @@ describe("real ffprobe over HTTP (like a signed R2 URL)", () => {
 
   it("a corrupt file that only looks like an MP4 is still rejected", async () => {
     await expect(assertRemoteVideoIsPlayable(`${base}/bad.mp4`)).rejects.toBeInstanceOf(UnsupportedVideoFormatError);
+  });
+
+  it("ffprobe reads through the local relay and only pulls the headers of a huge file", async () => {
+    const { streams, bytes } = await probeRemoteForTest(`${base}/huge.mp4`);
+    expect(streams.some((x) => x.codec_type === "video")).toBe(true);
+    expect(bytes).toBeLessThan(16 * 1024 * 1024);
+    expect(hugeServed).toBeLessThan(32 * 1024 * 1024); // the source wasn't drained either
+  });
+
+  it("hitting the byte cap is 'couldn't check', never 'not a video'", async () => {
+    await expect(probeRemoteForTest(`${base}/huge.mp4`, 1024)).rejects.toBeInstanceOf(VideoProbeUnavailableError);
   });
 
   it("a valid video passes", async () => {

@@ -31,11 +31,51 @@ function addDays(day: string, days: number): string {
   return d.toISOString().slice(0, 10);
 }
 
-/** Parses what the API receives (YYYY-MM-DD or a full ISO timestamp). */
+const PLAIN_DAY = /^(\d{4,})-(\d{2})-(\d{2})$/;
+
+function isUtcMidnight(date: Date): boolean {
+  return date.getUTCHours() === 0 && date.getUTCMinutes() === 0 && date.getUTCSeconds() === 0 && date.getUTCMilliseconds() === 0;
+}
+
+/**
+ * The calendar day a start date means.
+ * - "YYYY-MM-DD" (what the website sends) is that day, literally — never
+ *   shifted by any time zone.
+ * - A stored value at UTC midnight (how every start date is saved) is that
+ *   UTC date.
+ * - Any other timestamp is read as the day it falls on in India.
+ */
 export function parseStartDay(raw: string | Date): string | null {
+  if (typeof raw === "string") {
+    const m = PLAIN_DAY.exec(raw.trim());
+    if (m) {
+      const [, y, mo, d] = m;
+      const check = new Date(Date.UTC(Number(y), Number(mo) - 1, Number(d)));
+      // Rejects 2026-02-31 and the like (Date would roll it into March).
+      const valid =
+        Number(y) >= 1000 && check.getUTCFullYear() === Number(y) && check.getUTCMonth() === Number(mo) - 1 && check.getUTCDate() === Number(d);
+      return valid ? `${y}-${mo}-${d}` : null;
+    }
+  }
   const date = raw instanceof Date ? raw : new Date(raw);
   if (Number.isNaN(date.getTime())) return null;
-  return toIstDay(date);
+  return isUtcMidnight(date) ? date.toISOString().slice(0, 10) : toIstDay(date);
+}
+
+/** Every day a stored start date could reasonably be shown as (its UTC date
+ * and its date in India) — so re-sending the value a client displayed never
+ * counts as "changing" it. */
+export function storedStartDays(stored: Date | null | undefined): Set<string> {
+  if (!stored || Number.isNaN(stored.getTime())) return new Set();
+  return new Set([stored.toISOString().slice(0, 10), toIstDay(stored), parseStartDay(stored)!]);
+}
+
+/** What to save: the start day at UTC midnight, like all existing rows. */
+export function startDateForStorage(raw: string | Date): Date | undefined {
+  const day = parseStartDay(raw);
+  if (!day) return undefined;
+  const [y, m, d] = day.split("-").map(Number);
+  return new Date(Date.UTC(y, m - 1, d));
 }
 
 /** A user-facing problem with a start date being set, or null if fine. */
