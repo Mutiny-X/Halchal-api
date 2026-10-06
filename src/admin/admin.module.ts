@@ -3,6 +3,7 @@ import { Module } from "@nestjs/common";
 import { AdminRolesModule } from "../admin-roles/admin-roles.module";
 import { AuthModule } from "../auth/auth.module";
 import { CampaignsModule } from "../campaigns/campaigns.module";
+import { CreatorProfilesModule } from "../creator-profiles/creator-profiles.module";
 import { FaqsModule } from "../faqs/faqs.module";
 import { MarketplaceModule } from "../marketplace/marketplace.module";
 import { NotificationsModule } from "../notifications/notifications.module";
@@ -19,6 +20,7 @@ import { AdminService } from "./admin.service";
     AdminRolesModule,
     AuthModule,
     CampaignsModule,
+    CreatorProfilesModule,
     FaqsModule,
     MarketplaceModule,
     NotificationsModule,

@@ -27,6 +27,7 @@ import type { AuthJwtPayload } from "../auth/auth.types";
 import { ListCampaignsQueryDto } from "../campaigns/dto/list-campaigns-query.dto";
 import { BufferedUploadGuard } from "../direct-upload/buffered-upload.guard";
 import { CampaignsService } from "../campaigns/campaigns.service";
+import { InstagramAccountInsightsService } from "../creator-profiles/instagram-account-insights.service";
 import { ObjectStorageService } from "../storage/object-storage.service";
 import { AdminSectionRoute } from "../admin-roles/decorators/admin-section.decorator";
 import { AdminSectionGuard } from "../admin-roles/guards/admin-section.guard";
@@ -164,6 +165,7 @@ export class AdminController {
     private readonly campaignInvites: CampaignInviteService,
     private readonly storage: ObjectStorageService,
     private readonly campaigns: CampaignsService,
+    private readonly instagramInsights: InstagramAccountInsightsService,
   ) {}
 
   @Get("me/permissions")
@@ -301,6 +303,19 @@ export class AdminController {
   @AdminSectionRoute("clippers")
   getCreator(@Param("id") id: string) {
     return this.admin.getCreatorDetail(id);
+  }
+
+  /** Everything Instagram's Insights API reports for one of the creator's
+   * connected accounts. Cached for 6h; `?refresh=1` re-syncs (at most once
+   * every 5 minutes per account). */
+  @Get("creators/:id/instagram-insights/:connectionId")
+  @AdminSectionRoute("clippers")
+  getCreatorInstagramInsights(
+    @Param("id") id: string,
+    @Param("connectionId") connectionId: string,
+    @Query("refresh") refresh?: string,
+  ) {
+    return this.instagramInsights.getReport(id, connectionId, { refresh: refresh === "1" || refresh === "true" });
   }
 
   @Post("creators/:id/kyc-review")
