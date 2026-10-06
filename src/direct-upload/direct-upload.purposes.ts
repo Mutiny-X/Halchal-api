@@ -9,6 +9,7 @@ import { UserRole } from "@prisma/client";
 export type DirectUploadPurpose =
   | "campaign-cover"
   | "campaign-asset"
+  | "campaign-source"
   | "brand-logo"
   | "admin-brand-logo"
   | "avatar"
@@ -59,6 +60,16 @@ export const DIRECT_UPLOAD_RULES: Record<DirectUploadPurpose, DirectUploadRule> 
     contentTypes: [...IMAGE_TYPES, ...VIDEO_TYPES],
     // R2's single-PUT ceiling.
     maxBytes: 5 * 1024 * MB,
+    checkVideoPlayable: true,
+    needsDeliverable: false,
+  },
+  // "Upload from device" source files for creators to reuse — capped
+  // lower than sample content (product decision: 3 GB).
+  "campaign-source": {
+    folder: "reference-assets",
+    roles: [UserRole.brand, UserRole.staff, UserRole.admin],
+    contentTypes: [...IMAGE_TYPES, ...VIDEO_TYPES],
+    maxBytes: 3 * 1024 * MB,
     checkVideoPlayable: true,
     needsDeliverable: false,
   },

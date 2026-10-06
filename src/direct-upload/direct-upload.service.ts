@@ -39,6 +39,13 @@ const SNIFF_BYTES = 4096;
 const presignLimiter = new UserRateLimiter(60, 60_000);
 const completeLimiter = new UserRateLimiter(60, 60_000);
 
+/** 3221225472 → "3 GB", 10485760 → "10 MB" (binary units, as file pickers show). */
+function formatSize(bytes: number): string {
+  const gb = bytes / 1024 ** 3;
+  if (gb >= 1) return `${Number.isInteger(gb) ? gb : gb.toFixed(1)} GB`;
+  return `${Math.ceil(bytes / 1024 ** 2)} MB`;
+}
+
 function invalid(message: string): BadRequestException {
   return new BadRequestException({ code: "VALIDATION_ERROR", message });
 }
@@ -128,7 +135,7 @@ export class DirectUploadService {
     }
     if (!Number.isInteger(input.size) || input.size < 1) throw invalid("File is empty");
     if (input.size > rule.maxBytes) {
-      throw invalid(`File is too large — max is ${Math.round(rule.maxBytes / (1024 * 1024))} MB`);
+      throw invalid(`File is ${formatSize(input.size)} — the limit here is ${formatSize(rule.maxBytes)}`);
     }
     await this.authorize(rule, userId, role, input.deliverableId);
 

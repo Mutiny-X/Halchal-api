@@ -250,3 +250,23 @@ describe("BufferedUploadGuard", () => {
     expect(guard(true, true).canActivate()).toBe(true);
   });
 });
+
+describe("source files from device: 3 GB limit", () => {
+  const GB = 1024 ** 3;
+  it("allows exactly 3 GB", async () => {
+    await expect(setup().service.presign("u-src", UserRole.brand, { purpose: "campaign-source", contentType: "video/mp4", size: 3 * GB })).resolves.toBeTruthy();
+  });
+  it("refuses 1 byte over 3 GB, saying the size and the limit", async () => {
+    const err = await setup().service.presign("u-src", UserRole.brand, { purpose: "campaign-source", contentType: "video/mp4", size: 3 * GB + 1 }).catch((e) => e);
+    expect(err).toBeInstanceOf(BadRequestException);
+    expect(err.getResponse().message).toBe("File is 3.0 GB — the limit here is 3 GB");
+  });
+  it("sample content keeps its 5 GB limit", async () => {
+    await expect(setup().service.presign("u-src", UserRole.brand, { purpose: "campaign-asset", contentType: "video/mp4", size: 4 * GB })).resolves.toBeTruthy();
+  });
+  it("source uploads land in the same campaign folder (so campaign link rules accept them)", async () => {
+    const ctx = setup();
+    const res = await ctx.service.presign("u-src", UserRole.brand, { purpose: "campaign-source", contentType: "video/mp4", size: 10 });
+    expect(verifyTicket(res.uploadId, SECRET)!.finalKey).toMatch(/^reference-assets\//);
+  });
+});
