@@ -32,6 +32,7 @@ import {
 } from "./campaign-platforms";
 import type { Env } from "../config/env";
 import { assertCampaignUrlsAllowed } from "./asset-url-rules";
+import { parseStartDay, startDateProblem } from "./start-date-rules";
 import type { CreateCampaignDto, UpdateCampaignDto } from "./dto/campaign.dto";
 import type { ListCampaignsQueryDto } from "./dto/list-campaigns-query.dto";
 
@@ -273,6 +274,10 @@ export class CampaignsService {
     }
 
     assertCampaignUrlsAllowed(dto, null, this.storageBaseUrl());
+    if (dto.startDate) {
+      const problem = startDateProblem(dto.startDate);
+      if (problem) throw new BadRequestException({ code: "VALIDATION_ERROR", message: problem });
+    }
 
     if (isLive) {
       this.assertPublishable(
@@ -379,6 +384,17 @@ export class CampaignsService {
 
     assertCampaignUrlsAllowed(dto, existing, this.storageBaseUrl());
 
+    // Only a NEW or CHANGED start date is checked: a live campaign that
+    // started last week legitimately has a past date, and the wizard re-sends
+    // it on every save.
+    if (
+      dto.startDate &&
+      parseStartDay(dto.startDate) !== (existing.startDate ? parseStartDay(existing.startDate) : null)
+    ) {
+      const problem = startDateProblem(dto.startDate);
+      if (problem) throw new BadRequestException({ code: "VALIDATION_ERROR", message: problem });
+    }
+
     const nextStatus = dto.status ?? existing.status;
     if (dto.status && dto.status !== existing.status) {
       this.assertStatusTransition(existing.status, dto.status);
@@ -405,6 +421,7 @@ export class CampaignsService {
           maxPayoutPaise: dto.maxPayoutPaise ?? existing.maxPayoutPaise,
           budgetPaise: dto.budgetPaise ?? existing.budgetPaise,
           brief: dto.brief ?? existing.brief,
+          startDate: dto.startDate ?? existing.startDate ?? undefined,
         },
         // Full content rules apply to a first publish only. A paused
         // campaign was already live once — re-checking it against rules that
@@ -616,6 +633,7 @@ export class CampaignsService {
       locationType?: string;
       targetStates?: string[];
       sourceAssets?: unknown;
+      startDate?: string | Date;
       ratePer1kPaise?: number;
       maxPayoutPaise?: number;
       budgetPaise?: number;
@@ -656,6 +674,12 @@ export class CampaignsService {
     }
     if (!hasUsableSourceAsset(input.sourceAssets)) {
       fail("Add at least one source asset before publishing");
+    }
+    if (!input.startDate) {
+      fail("Choose a start date before publishing");
+    }
+    if (parseStartDay(input.startDate!) === null || startDateProblem(input.startDate!)?.includes("past")) {
+      fail("The start date has passed — choose today or a later date before publishing");
     }
     if (input.maxPayoutPaise! < MIN_PUBLISH_MAX_PAYOUT_PAISE) {
       fail("Max payout per creator must be at least ₹1,000");

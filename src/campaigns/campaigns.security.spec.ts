@@ -36,7 +36,7 @@ function completeDraft(overrides: Record<string, unknown> = {}) {
     maxPayoutPaise: 5_000_000,
     budgetPaise: 10_000_000,
     budgetUsedPaise: 0,
-    startDate: null,
+    startDate: new Date(Date.now() + 24 * 60 * 60 * 1000),
     createdAt: new Date("2026-10-01"),
     updatedAt: new Date("2026-10-01"),
     ...overrides,
@@ -238,6 +238,7 @@ describe("server-side publish rules", () => {
         ratePer1kPaise: 5_000,
         maxPayoutPaise: 5_000_000,
         budgetPaise: 10_000_000,
+        startDate: new Date(Date.now() + 86_400_000).toISOString().slice(0, 10),
       } as never),
       /source asset/,
     );
@@ -352,5 +353,67 @@ describe("campaign link rules are enforced on save (item 15)", () => {
       /Cover image/,
     );
     expect(ctx.prisma.campaign.create).not.toHaveBeenCalled();
+  });
+});
+
+describe("campaign start date (can't start in the past)", () => {
+  const day = (offsetDays: number) => new Date(Date.now() + offsetDays * 86_400_000).toISOString().slice(0, 10);
+  const updateWith = (existing: Record<string, unknown>, dto: Record<string, unknown>) => {
+    const ctx = setup();
+    ctx.prisma.brandProfile.findUnique.mockResolvedValue({ id: "brand-1" });
+    ctx.prisma.campaign.findUnique.mockResolvedValue(completeDraft(existing));
+    return { ctx, run: ctx.service.update("user-brand", UserRole.brand, "camp-1", dto as never) };
+  };
+
+  it("refuses setting a past start date on a draft", async () => {
+    const { ctx, run } = updateWith({}, { startDate: day(-3) });
+    await expectValidationError(run, /can't be in the past/);
+    expect(ctx.prisma.campaign.update).not.toHaveBeenCalled();
+  });
+
+  it("refuses a past start date on create", async () => {
+    const ctx = setup();
+    ctx.prisma.brandProfile.findUnique.mockResolvedValue({ id: "brand-1" });
+    await expectValidationError(ctx.service.create("user-brand", UserRole.brand, { title: "x", startDate: day(-1) } as never), /past/);
+  });
+
+  it("refuses a start date more than 12 months away (typos like year 20260)", async () => {
+    await expectValidationError(updateWith({}, { startDate: day(400) }).run, /within the next 12 months/);
+  });
+
+  it("accepts today and future dates", async () => {
+    const today = updateWith({}, { startDate: new Date().toISOString() });
+    await today.run;
+    expect(today.ctx.prisma.campaign.update).toHaveBeenCalled();
+    const later = updateWith({}, { startDate: day(30) });
+    await later.run;
+    expect(later.ctx.prisma.campaign.update).toHaveBeenCalled();
+  });
+
+  it("a live campaign that already started can still be edited (unchanged past date is fine)", async () => {
+    const started = new Date(Date.now() - 7 * 86_400_000);
+    const { ctx, run } = updateWith(
+      { status: CampaignStatus.live, startDate: started },
+      { title: "renamed", startDate: started.toISOString().slice(0, 10) },
+    );
+    await run;
+    expect(ctx.prisma.campaign.update).toHaveBeenCalled();
+  });
+
+  it("first publish needs a start date, and not one that has already passed", async () => {
+    await expectValidationError(updateWith({ startDate: null }, { status: CampaignStatus.live }).run, /Choose a start date/);
+    await expectValidationError(
+      updateWith({ startDate: new Date(Date.now() - 2 * 86_400_000) }, { status: CampaignStatus.live }).run,
+      /start date has passed/,
+    );
+  });
+
+  it("resuming a paused campaign whose start date is past is still allowed", async () => {
+    const { ctx, run } = updateWith(
+      { status: CampaignStatus.paused, startDate: new Date(Date.now() - 30 * 86_400_000) },
+      { status: CampaignStatus.live },
+    );
+    await run;
+    expect(ctx.prisma.campaign.update).toHaveBeenCalled();
   });
 });
