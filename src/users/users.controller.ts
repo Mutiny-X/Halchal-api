@@ -14,6 +14,7 @@ import {
 } from "@nestjs/common";
 import { FileInterceptor } from "@nestjs/platform-express";
 import { ApiBearerAuth, ApiOkResponse, ApiTags } from "@nestjs/swagger";
+import { Throttle } from "@nestjs/throttler";
 import { IsIn, IsString } from "class-validator";
 import { memoryStorage } from "multer";
 
@@ -116,6 +117,7 @@ export class UsersController {
   }
 
   @Post("me/change-password")
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
   changePassword(
     @CurrentUser() user: AuthJwtPayload,
     @Body() body: ChangePasswordDto,

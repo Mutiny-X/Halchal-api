@@ -33,13 +33,16 @@ export class AuthController {
     return this.auth.registerBrand(dto);
   }
 
+  // Team sign-in. Tight limit per client to slow password guessing.
   @Post("brand/login")
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
   @ApiOkResponse({ type: AuthResponseDto })
   loginBrand(@Body() dto: BrandLoginDto) {
     return this.auth.loginBrand(dto);
   }
 
   @Post("admin/login")
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
   @ApiOkResponse({ type: AuthResponseDto })
   loginAdmin(@Body() dto: AdminLoginDto) {
     return this.auth.loginAdmin(dto);

@@ -35,11 +35,12 @@ export class StaffService {
       companyEmail: a.brandProfile.companyEmail,
       campaignCount: a.brandProfile._count.campaigns,
       assignedAt: a.assignedAt.toISOString(),
+      accessLevel: a.accessLevel,
     }));
   }
 
   async getBrand(staffUserId: string, brandProfileId: string) {
-    await this.assertAssigned(staffUserId, brandProfileId);
+    const accessLevel = await this.assertAssigned(staffUserId, brandProfileId);
 
     const b = await this.prisma.brandProfile.findUnique({
       where: { id: brandProfileId },
@@ -55,6 +56,7 @@ export class StaffService {
 
     return {
       id: b.id,
+      accessLevel,
       companyName: b.companyName,
       companyEmail: b.companyEmail,
       logoUrl: b.logoUrl,
@@ -105,5 +107,6 @@ export class StaffService {
         message: "View-only access — cannot create campaigns for this brand",
       });
     }
+    return assignment.accessLevel;
   }
 }

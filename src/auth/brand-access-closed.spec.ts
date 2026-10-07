@@ -71,10 +71,23 @@ describe("brand access is closed", () => {
     expect(email.sendPasswordReset).toHaveBeenCalledWith("s@x.com", expect.any(String));
   });
 
-  it("rejects a brand access token on every request", () => {
-    const strategy = new JwtStrategy({ get: () => "secret" } as never);
-    expect(() => strategy.validate({ sub: "b", role: "brand" } as never)).toThrow(UnauthorizedException);
-    expect(strategy.validate({ sub: "s", role: "staff" } as never)).toMatchObject({ sub: "s" });
+  it("rejects a brand access token on every request", async () => {
+    const prisma = { user: { findUnique: vi.fn().mockResolvedValue({ isActive: true, role: "staff" }) } };
+    const strategy = new JwtStrategy({ get: () => "secret" } as never, prisma as never);
+    await expect(strategy.validate({ sub: "b", role: "brand" } as never)).rejects.toBeInstanceOf(UnauthorizedException);
+    await expect(strategy.validate({ sub: "s", role: "staff" } as never)).resolves.toMatchObject({ sub: "s" });
+  });
+
+  it("stops a deactivated or removed team member on their next request", async () => {
+    const prisma = { user: { findUnique: vi.fn() } };
+    const strategy = new JwtStrategy({ get: () => "secret" } as never, prisma as never);
+    prisma.user.findUnique.mockResolvedValueOnce({ isActive: false, role: "staff" });
+    await expect(strategy.validate({ sub: "s", role: "staff" } as never)).rejects.toBeInstanceOf(UnauthorizedException);
+    prisma.user.findUnique.mockResolvedValueOnce(null);
+    await expect(strategy.validate({ sub: "s", role: "staff" } as never)).rejects.toBeInstanceOf(UnauthorizedException);
+    // Other roles aren't looked up per request.
+    await expect(strategy.validate({ sub: "c", role: "creator" } as never)).resolves.toMatchObject({ sub: "c" });
+    expect(prisma.user.findUnique).toHaveBeenCalledTimes(2);
   });
 
   it("stops brand campaign invites", async () => {

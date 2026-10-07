@@ -27,6 +27,10 @@ async function bootstrap(): Promise<void> {
     bufferLogs: true,
   });
   app.useLogger(app.get(Logger));
+  // Railway puts one proxy in front of the app. Without this every request
+  // looks like it comes from that proxy, so rate limits (sign-in attempts
+  // included) were shared by all users instead of counted per person.
+  app.set("trust proxy", 1);
 
   app.use(
     helmet({

@@ -20,6 +20,21 @@ export class CampaignAccessService {
     return profile?.id ?? null;
   }
 
+  /** "full" or "view" — what this viewer may do on a campaign they can
+   * already see (call assertCanAccessCampaign first). */
+  async accessLevelFor(
+    userId: string,
+    role: UserRole,
+    campaign: { brandProfileId: string | null },
+  ): Promise<"full" | "view"> {
+    if (role !== UserRole.staff || !campaign.brandProfileId) return "full";
+    const assignment = await this.prisma.staffBrandAssignment.findUnique({
+      where: { staffUserId_brandProfileId: { staffUserId: userId, brandProfileId: campaign.brandProfileId } },
+      select: { accessLevel: true },
+    });
+    return assignment?.accessLevel === StaffAccessLevel.full ? "full" : "view";
+  }
+
   async assertCanAccessCampaign(
     userId: string,
     role: UserRole,

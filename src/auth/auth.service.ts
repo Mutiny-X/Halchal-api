@@ -146,7 +146,10 @@ export class AuthService {
       !stored ||
       stored.usedAt ||
       stored.expiresAt < new Date() ||
-      stored.user.role !== UserRole.staff ||
+      // Team members reset here; admins only use it through the one-time
+      // setup link in their welcome email (forgot-password never issues
+      // admin links).
+      (stored.user.role !== UserRole.staff && stored.user.role !== UserRole.admin) ||
       !stored.user.isActive
     ) {
       throw new BadRequestException({
