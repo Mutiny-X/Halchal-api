@@ -1,13 +1,14 @@
 import {
   BadRequestException,
   ConflictException,
+  ForbiddenException,
   Injectable,
   NotFoundException,
   UnauthorizedException,
 } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { JwtService } from "@nestjs/jwt";
-import { Prisma, User, UserRole } from "@prisma/client";
+import { Prisma, UserRole } from "@prisma/client";
 import * as bcrypt from "bcryptjs";
 import { randomBytes } from "node:crypto";
 
@@ -15,8 +16,7 @@ import { parseDurationMs } from "../common/parse-duration";
 import type { Env } from "../config/env";
 import { PrismaService } from "../prisma/prisma.service";
 import { EmailService } from "../notifications/email.service";
-import { InAppNotificationService } from "../notifications/in-app-notification.service";
-import type { AuthJwtPayload, AuthTokens } from "./auth.types";
+import { BRAND_ACCESS_CLOSED, type AuthJwtPayload, type AuthTokens } from "./auth.types";
 import { hashRefreshToken, normalizePhone, OtpService } from "./otp.service";
 import type { AdminLoginDto } from "./dto/admin-auth.dto";
 import type { BrandLoginDto, BrandRegisterDto } from "./dto/brand-auth.dto";
@@ -30,59 +30,16 @@ export class AuthService {
     private readonly config: ConfigService<Env, true>,
     private readonly otp: OtpService,
     private readonly email: EmailService,
-    private readonly notifications: InAppNotificationService,
   ) {}
 
-  async registerBrand(dto: BrandRegisterDto) {
-    const email = dto.email.toLowerCase();
-    const existing = await this.prisma.user.findUnique({ where: { email } });
-    if (existing) {
-      throw brandEmailConflict(existing);
-    }
-
-    const passwordHash = await bcrypt.hash(dto.password, 12);
-    // One nested write = one transaction: the user, brand profile and wallet
-    // are created together or not at all. Separately, a failure after the
-    // user row left a brand login with no BrandProfile, which campaign
-    // scoping then had no brand to filter on.
-    let user: User & { brandProfile: { id: string } | null };
-    try {
-      user = await this.prisma.user.create({
-        data: {
-          role: UserRole.brand,
-          email,
-          passwordHash,
-          displayName: dto.displayName?.trim() || dto.companyName,
-          termsAcceptedAt: new Date(),
-          brandProfile: { create: { companyName: dto.companyName.trim() } },
-          wallet: { create: {} },
-        },
-        include: { brandProfile: { select: { id: true } } },
-      });
-    } catch (error) {
-      // Two sign-ups racing on the same email: the unique index catches the
-      // second one — report it the same way as the pre-check above.
-      if (
-        error instanceof Prisma.PrismaClientKnownRequestError &&
-        error.code === "P2002"
-      ) {
-        throw new ConflictException({
-          code: "CONFLICT",
-          message: "This email already has an account. Sign in instead.",
-        });
-      }
-      throw error;
-    }
-    const brandProfile = user.brandProfile!;
-
-    await this.notifications.notifyAllAdmins({
-      type: "brand.registered",
-      title: "New brand registered",
-      body: dto.companyName.trim(),
-      link: `/admin/brands/${brandProfile.id}`,
+  /** Brand self sign-up is closed (see BRAND_ACCESS_CLOSED) — admins add
+   * brands from the admin panel instead. The route stays so an old sign-up
+   * page or a direct call gets a clear answer rather than a 404. */
+  registerBrand(_dto: BrandRegisterDto): never {
+    throw new ForbiddenException({
+      code: "BRAND_ACCESS_CLOSED",
+      message: "Brand sign-up is closed. The Halchal team sets up campaigns for brands — contact us to get started.",
     });
-
-    return this.issueTokens(user);
   }
 
   async loginAdmin(dto: AdminLoginDto) {
@@ -124,7 +81,11 @@ export class AuthService {
       });
     }
 
-    if (user.role !== UserRole.brand && user.role !== UserRole.staff) {
+    if (user.role === UserRole.brand) {
+      throw new UnauthorizedException(BRAND_ACCESS_CLOSED);
+    }
+
+    if (user.role !== UserRole.staff) {
       throw invalidBrandCredentials();
     }
 
@@ -144,7 +105,9 @@ export class AuthService {
     const user = await this.prisma.user.findUnique({
       where: { email: email.toLowerCase() },
     });
-    if (!user || user.role !== UserRole.brand) {
+    // Only team members sign in with a password here now. Same answer
+    // either way, so this can't be used to find out who has an account.
+    if (!user || user.role !== UserRole.staff || !user.isActive) {
       return { sent: true };
     }
 
@@ -183,7 +146,11 @@ export class AuthService {
       !stored ||
       stored.usedAt ||
       stored.expiresAt < new Date() ||
-      stored.user.role !== UserRole.brand
+      // Team members reset here; admins only use it through the one-time
+      // setup link in their welcome email (forgot-password never issues
+      // admin links).
+      (stored.user.role !== UserRole.staff && stored.user.role !== UserRole.admin) ||
+      !stored.user.isActive
     ) {
       throw new BadRequestException({
         code: "VALIDATION_ERROR",
@@ -330,6 +297,24 @@ export class AuthService {
       });
     }
 
+    // A session can't outlive the account's access: brands are closed out,
+    // and a deactivated team member stops at their next refresh instead of
+    // staying signed in for as long as they keep the tab open.
+    if (
+      stored.user.role === UserRole.brand ||
+      (stored.user.role === UserRole.staff && !stored.user.isActive)
+    ) {
+      await this.prisma.refreshToken.updateMany({
+        where: { userId: stored.user.id, revokedAt: null },
+        data: { revokedAt: new Date() },
+      });
+      throw new UnauthorizedException(
+        stored.user.role === UserRole.brand
+          ? BRAND_ACCESS_CLOSED
+          : { code: "UNAUTHORIZED", message: "This account has been deactivated" },
+      );
+    }
+
     await this.prisma.refreshToken.update({
       where: { id: stored.id },
       data: { revokedAt: new Date() },
@@ -414,34 +399,6 @@ export class AuthService {
   }
 }
 
-function brandEmailConflict(existing: User): ConflictException {
-  if (existing.role === UserRole.creator) {
-    return new ConflictException({
-      code: "WRONG_PORTAL",
-      message:
-        "This email is registered as a creator account. Use the creator app or a different email.",
-    });
-  }
-
-  if (existing.role === UserRole.brand) {
-    return new ConflictException({
-      code: "CONFLICT",
-      message: "This email already has a brand account. Sign in instead.",
-    });
-  }
-
-  if (existing.role === UserRole.admin) {
-    return new ConflictException({
-      code: "CONFLICT",
-      message: "Email already registered",
-    });
-  }
-
-  return new ConflictException({
-    code: "CONFLICT",
-    message: "Email already registered",
-  });
-}
 
 function invalidBrandCredentials(): UnauthorizedException {
   return new UnauthorizedException({

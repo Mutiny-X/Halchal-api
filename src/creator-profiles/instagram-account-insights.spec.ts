@@ -206,3 +206,23 @@ describe("InstagramAccountInsightsService", () => {
     expect(fake.calls.filter((c) => c.endsWith("/me") || c.includes("/me?")).length).toBe(1);
   });
 });
+
+describe("what Instagram didn't share — wording", () => {
+  it("explains a withheld engaged-audience breakdown by engagement, not follower count", async () => {
+    const { classifyGraphError } = await import("./instagram-account-insights.parse");
+    const err = { code: 100, message: "Not enough users engaged" };
+    expect(classifyGraphError(err, 5000, "engaged_age").message).toMatch(/Not enough people liked/);
+    expect(classifyGraphError(err, 40, "followers_age").message).toMatch(/at least 100 followers/);
+  });
+
+  it("recognises posts made before the business-account switch", async () => {
+    const { postedBeforeBusinessAccount } = await import("./instagram-account-insights.parse");
+    expect(postedBeforeBusinessAccount({ code: 10, error_subcode: 2108006 })).toBe(true);
+    expect(
+      postedBeforeBusinessAccount({
+        message: "The media was posted before the most recent time that the user's account was converted to a business account from a personal account.",
+      }),
+    ).toBe(true);
+    expect(postedBeforeBusinessAccount({ code: 190, message: "token expired" })).toBe(false);
+  });
+});

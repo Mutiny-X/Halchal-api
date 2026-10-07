@@ -7,6 +7,7 @@ import { PrismaService } from "../prisma/prisma.service";
 import {
   breakdownOf,
   classifyGraphError,
+  postedBeforeBusinessAccount,
   contentKind,
   contentMix,
   engagementByReach,
@@ -166,7 +167,7 @@ export class InstagramAccountInsightsService {
     const p = profileRes.data;
     const igId = encodeURIComponent(p.user_id ?? p.id ?? connection.platformUserId);
     const followerCount = p.followers_count ?? 0;
-    const note = (section: string, error: GraphError) => unavailable.push({ section, ...classifyGraphError(error, followerCount) });
+    const note = (section: string, error: GraphError) => unavailable.push({ section, ...classifyGraphError(error, followerCount, section) });
 
     const insights = (query: string) => this.graph<InsightsResponse>(`/${igId}/insights?${query}&access_token=${token}`);
 
@@ -224,14 +225,18 @@ export class InstagramAccountInsightsService {
     if (mediaRes.error) note("content", mediaRes.error);
     const media = mediaRes.data?.data ?? [];
     const recent = media.filter((m) => contentKind(m) !== "story").slice(0, POSTS_WITH_INSIGHTS);
-    const denied: { error: GraphError | null } = { error: null };
+    const denied: { error: GraphError | null; count: number; beforeBusiness: number } = { error: null, count: 0, beforeBusiness: 0 };
     const posts = await this.pool(recent, async (item) => {
       const kind = contentKind(item);
       let r = await this.graph<InsightsResponse>(`/${encodeURIComponent(item.id)}/insights?metric=${mediaMetricsFor(kind)}&access_token=${token}`);
       if (r.error && r.error.code !== 10 && r.error.code !== 200) {
         r = await this.graph<InsightsResponse>(`/${encodeURIComponent(item.id)}/insights?metric=${FALLBACK_MEDIA_METRICS}&access_token=${token}`);
       }
-      if (r.error) denied.error ??= r.error;
+      if (r.error) {
+        denied.error ??= r.error;
+        denied.count += 1;
+        if (postedBeforeBusinessAccount(r.error)) denied.beforeBusiness += 1;
+      }
       const metrics = postMetricsFrom(r.error ? null : r.data, item);
       return {
         id: item.id,
@@ -245,7 +250,17 @@ export class InstagramAccountInsightsService {
         engagementByReach: engagementByReach(metrics),
       };
     });
-    if (denied.error) note("post_insights", denied.error);
+    if (denied.beforeBusiness > 0 && denied.beforeBusiness === denied.count) {
+      // Normal, not a failure: Instagram keeps no insights for posts made
+      // before the account became a business/creator account.
+      unavailable.push({
+        section: "post_insights",
+        reason: "not_supported",
+        message: `${denied.beforeBusiness} of ${recent.length} recent posts were published before this account switched to a business/creator account, so Instagram has no insights for them. Newer posts are shown with their insights.`,
+      });
+    } else if (denied.error) {
+      note("post_insights", denied.error);
+    }
 
     const followsTotals = new Map((follows ?? []).map((f) => [f.key, f.value]));
     const n = (k: string) => (typeof totals[k] === "number" ? totals[k] : null);

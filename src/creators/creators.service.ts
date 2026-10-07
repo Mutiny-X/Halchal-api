@@ -37,7 +37,12 @@ export class CreatorsService {
 
     const [participations, linkedProfiles] = await Promise.all([
       this.prisma.campaignParticipation.findMany({
-        where: { creatorId },
+        // Only campaigns of brands this viewer can see — not the creator's
+        // work for every other brand.
+        where: {
+          creatorId,
+          ...(brandProfileIds ? { campaign: { brandProfileId: { in: brandProfileIds } } } : {}),
+        },
         include: {
           campaign: { select: { id: true, title: true, status: true } },
           deliverables: {

@@ -45,7 +45,7 @@ export class EmailService {
     const ttlLabel = formatDurationLabel(
       this.config.get("PASSWORD_RESET_TTL", { infer: true }),
     );
-    const subject = "Reset your Halchal brand password";
+    const subject = "Reset your Halchal password";
     const text = `Use this link to reset your password (valid ${ttlLabel}): ${resetUrl}`;
 
     await this.sendMail(email, subject, text, `password reset for ${email}\n  Link: ${resetUrl}`);
@@ -72,21 +72,23 @@ export class EmailService {
     );
   }
 
-  async sendStaffWelcome(email: string, name: string, password: string): Promise<void> {
+  /** Welcome for a new team member or admin. Carries a one-time link to
+   * choose their password — the password itself is never emailed. */
+  async sendStaffWelcome(email: string, name: string, setupToken: string): Promise<void> {
     const staffUrl = this.config.get("STAFF_WEB_URL", { infer: true });
     const baseUrl = staffUrl ? staffUrl.replace(/\/$/, "") : this.webBaseUrl();
-    const loginUrl = `${baseUrl}/login`;
-    const subject = "Welcome to Halchal — Your Staff Account";
-    const text = `Hi ${name},\n\nYour Halchal staff account has been created.\n\nLogin URL: ${loginUrl}\nEmail: ${email}\nPassword: ${password}\n\nYou will be able to manage the brands assigned to you.\n\nTeam Halchal`;
-    await this.sendMail(email, subject, text, `staff welcome for ${email}`);
+    const setupUrl = `${baseUrl}/reset-password?token=${encodeURIComponent(setupToken)}`;
+    const subject = "Welcome to Halchal — set up your team account";
+    const text = `Hi ${name},\n\nYour Halchal team account has been created for ${email}.\n\nChoose your password here (the link works once and expires in 3 days):\n${setupUrl}\n\nThen sign in at ${baseUrl}/login to manage the brands assigned to you.\n\nTeam Halchal`;
+    await this.sendMail(email, subject, text, `staff welcome for ${email}\n  Link: ${setupUrl}`);
   }
 
-  async sendAdminWelcome(email: string, name: string, password: string, roleName: string): Promise<void> {
+  async sendAdminWelcome(email: string, name: string, setupToken: string, roleName: string): Promise<void> {
     const baseUrl = this.webBaseUrl();
-    const loginUrl = `${baseUrl}/admin/login`;
-    const subject = "Welcome to Halchal — Your Admin Account";
-    const text = `Hi ${name},\n\nYour Halchal admin account has been created with the "${roleName}" role.\n\nLogin URL: ${loginUrl}\nEmail: ${email}\nPassword: ${password}\n\nTeam Halchal`;
-    await this.sendMail(email, subject, text, `admin welcome for ${email}`);
+    const setupUrl = `${baseUrl}/reset-password?token=${encodeURIComponent(setupToken)}`;
+    const subject = "Welcome to Halchal — set up your admin account";
+    const text = `Hi ${name},\n\nYour Halchal admin account has been created for ${email} with the "${roleName}" role.\n\nChoose your password here (the link works once and expires in 3 days):\n${setupUrl}\n\nThen sign in at ${baseUrl}/admin/login.\n\nTeam Halchal`;
+    await this.sendMail(email, subject, text, `admin welcome for ${email}\n  Link: ${setupUrl}`);
   }
 
   private getResendClient(): Resend {

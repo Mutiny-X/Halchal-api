@@ -20,6 +20,7 @@ import { computeParticipationSummary, isParticipationCompleted } from "../partic
 import { RealtimeService } from "../realtime/realtime.service";
 import { SupportService } from "../support/support.service";
 import { WalletService } from "../wallet/wallet.service";
+import { issuePasswordSetupToken } from "../auth/password-setup";
 import type { ListCampaignsQueryDto } from "../campaigns/dto/list-campaigns-query.dto";
 
 const ACTION_LABELS: Record<string, string> = {
@@ -32,6 +33,7 @@ const ACTION_LABELS: Record<string, string> = {
   "brand.unassigned": "Was unassigned from a brand",
   "staff.deactivated": "Account deactivated",
   "staff.reactivated": "Account reactivated",
+  "staff.removed": "Account removed",
   "task.assigned": "Was assigned a task",
   "task.completed": "Completed a task",
 };
@@ -435,14 +437,17 @@ export class AdminService {
         termsAcceptedAt: new Date(),
       },
     });
-    // fire-and-forget email
-    void this.email.sendStaffWelcome(email, dto.name.trim(), dto.password).catch(() => null);
+    // The welcome email carries a one-time link to choose a password; the
+    // password the admin typed is never emailed.
+    const setupToken = await issuePasswordSetupToken(this.prisma, user.id);
+    void this.email.sendStaffWelcome(email, dto.name.trim(), setupToken).catch(() => null);
     return this.formatStaffUser(user);
   }
 
   async listTeamMembers() {
     const members = await this.prisma.user.findMany({
-      where: { role: UserRole.staff },
+      // Removed members keep their row (for the activity log) but no email.
+      where: { role: UserRole.staff, email: { not: null } },
       orderBy: { createdAt: "desc" },
       include: {
         staffBrandAssignments: {
@@ -507,6 +512,9 @@ export class AdminService {
     await this.prisma.$transaction([
       this.prisma.user.update({ where: { id: staffUserId }, data: { isActive: false } }),
       this.prisma.staffBrandAssignment.deleteMany({ where: { staffUserId } }),
+      // Signed out everywhere now, not when their session would expire.
+      this.prisma.refreshToken.updateMany({ where: { userId: staffUserId, revokedAt: null }, data: { revokedAt: new Date() } }),
+      this.prisma.passwordResetToken.updateMany({ where: { userId: staffUserId, usedAt: null }, data: { usedAt: new Date() } }),
     ]);
     await this.activityLog.log(staffUserId, "staff.deactivated", {
       targetType: "User",
@@ -536,7 +544,24 @@ export class AdminService {
     if (user.isActive) {
       throw new BadRequestException({ code: "MUST_DEACTIVATE_FIRST", message: "Deactivate the team member before deleting." });
     }
-    await this.prisma.user.delete({ where: { id: staffUserId } });
+    // Removed, not erased: deleting the row would cascade away their activity
+    // log and tasks — the record of what they did. The account is scrubbed
+    // so it can never sign in again and the email is free to reuse.
+    await this.prisma.$transaction([
+      this.prisma.user.update({
+        where: { id: staffUserId },
+        data: {
+          isActive: false,
+          email: null,
+          passwordHash: null,
+          displayName: `${user.displayName ?? "Team member"} (removed)`,
+        },
+      }),
+      this.prisma.staffBrandAssignment.deleteMany({ where: { staffUserId } }),
+      this.prisma.refreshToken.updateMany({ where: { userId: staffUserId, revokedAt: null }, data: { revokedAt: new Date() } }),
+      this.prisma.passwordResetToken.updateMany({ where: { userId: staffUserId, usedAt: null }, data: { usedAt: new Date() } }),
+    ]);
+    await this.activityLog.log(staffUserId, "staff.removed", { targetType: "User", targetId: staffUserId });
     return { deleted: true };
   }
 
@@ -960,8 +985,9 @@ export class AdminService {
 
   async createAdminAccount(dto: { name: string; email: string; password: string; adminRoleId?: string | null }) {
     const account = await this.adminRoles.createAdminAccount(dto);
+    const setupToken = await issuePasswordSetupToken(this.prisma, account.id);
     void this.email
-      .sendAdminWelcome(account.email!, dto.name.trim(), dto.password, account.adminRoleName)
+      .sendAdminWelcome(account.email!, dto.name.trim(), setupToken, account.adminRoleName)
       .catch(() => null);
     return account;
   }
@@ -1051,7 +1077,10 @@ export class AdminService {
     return Array.from(byProfile.values());
   }
 
-  async payoutCampaign(campaignId: string, creatorId?: string) {
+  /** `creatorProfileId` narrows a per-creator payout to one payout row —
+   * the same person's two profiles in a campaign are listed (and confirmed)
+   * as separate rows, so paying one must not pay the other. */
+  async payoutCampaign(campaignId: string, creatorId?: string, creatorProfileId?: string) {
     const deliverables = await this.prisma.formatDeliverable.findMany({
       where: {
         status: FormatDeliverableStatus.proof_approved,
@@ -1059,6 +1088,7 @@ export class AdminService {
         participation: {
           campaignId,
           ...(creatorId ? { creatorId } : {}),
+          ...(creatorProfileId ? { creatorProfileId } : {}),
         },
       },
       include: {
@@ -1083,6 +1113,10 @@ export class AdminService {
     for (const d of deliverables) {
       const { title, ratePer1kPaise, maxPayoutPaise, brandProfileId } = d.participation.campaign;
       const amountPaise = computeEstimatedPaise(d.viewCount, ratePer1kPaise, maxPayoutPaise);
+      // Nothing earned yet (views not synced, or genuinely zero): marking it
+      // paid would lock it at ₹0 for good and tell the creator "You got
+      // paid". Leave it unpaid so it can be paid once views come in.
+      if (amountPaise <= 0) continue;
       const repost = d.marketplaceRepostClaim;
 
       let paidNow: boolean;

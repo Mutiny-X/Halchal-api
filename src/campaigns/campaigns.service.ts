@@ -280,9 +280,13 @@ export class CampaignsService {
     }
 
     await this.campaignAccess.assertCanAccessCampaign(userId, role, campaign);
+    const viewerAccess = await this.campaignAccess.accessLevelFor(userId, role, campaign);
 
     const budgetMap = await this.fetchBudgetUsedMap([campaign.id]);
     return {
+      // "view" for a view-only team member, so the website hides actions
+      // the API would refuse anyway.
+      viewerAccess,
       ...this.formatCampaign({ ...campaign, budgetUsedPaise: budgetMap[campaign.id] ?? campaign.budgetUsedPaise }),
       brandCompanyName: campaign.brandProfile?.companyName ?? null,
       submissionCount: campaign._count.submissions,

@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   ConflictException,
+  GoneException,
   Injectable,
   NotFoundException,
 } from "@nestjs/common";
@@ -20,8 +21,21 @@ import { EmailService } from "../notifications/email.service";
 import { PrismaService } from "../prisma/prisma.service";
 import { RealtimeService } from "../realtime/realtime.service";
 import { AuthService } from "./auth.service";
+import { BRAND_INVITES_OPEN } from "./auth.types";
 import { hashRefreshToken } from "./otp.service";
 import type { CampaignInviteAcceptDto } from "./dto/campaign-invite.dto";
+
+/** Inviting a brand to a campaign gave them a portal login — brands don't
+ * sign in any more (see BRAND_ACCESS_CLOSED), so no new invites go out and
+ * old links stop working. Listing and revoking old invites still work. */
+function assertInvitesOpen() {
+  if (!BRAND_INVITES_OPEN) {
+    throw new GoneException({
+      code: "BRAND_ACCESS_CLOSED",
+      message: "Brand invites are no longer used. The Halchal team manages campaigns for brands.",
+    });
+  }
+}
 
 @Injectable()
 export class CampaignInviteService {
@@ -34,6 +48,7 @@ export class CampaignInviteService {
   ) {}
 
   async preview(token: string) {
+    assertInvitesOpen();
     const invite = await this.findInviteByToken(token);
     if (!invite) {
       return {
@@ -74,6 +89,7 @@ export class CampaignInviteService {
   }
 
   async accept(dto: CampaignInviteAcceptDto) {
+    assertInvitesOpen();
     const invite = await this.findInviteByToken(dto.token);
     if (!invite) {
       throw new BadRequestException({
@@ -212,6 +228,7 @@ export class CampaignInviteService {
     campaignId: string,
     email: string,
   ) {
+    assertInvitesOpen();
     const campaign = await this.prisma.campaign.findUnique({
       where: { id: campaignId },
     });

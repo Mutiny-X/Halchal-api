@@ -296,4 +296,90 @@ describe("AdminService.payoutCampaign", () => {
     expect(tx.marketplaceRepost.update).not.toHaveBeenCalled();
     expect(result).toEqual({ paidCount: 0, totalPaidPaise: 0 });
   });
+  it("leaves a deliverable with nothing earned unpaid instead of locking it at ₹0", async () => {
+    const { service, prisma, wallet, notifications } = makePayoutService();
+    prisma.formatDeliverable.findMany.mockResolvedValue([
+      {
+        id: "deliverable-0",
+        participationId: "participation-1",
+        platform: "instagram_reel",
+        viewCount: 0,
+        status: "proof_approved",
+        marketplaceRepostClaim: null,
+        participation: { creatorId: "creator-b", campaignId: "campaign-1", campaign: campaignSelect },
+      },
+    ]);
+
+    const result = await service.payoutCampaign("campaign-1");
+
+    expect(prisma.formatDeliverable.updateMany).not.toHaveBeenCalled();
+    expect(wallet.creditEarning).not.toHaveBeenCalled();
+    expect(notifications.create).not.toHaveBeenCalled();
+    expect(result).toEqual({ paidCount: 0, totalPaidPaise: 0 });
+  });
+
+  it("pays only the chosen profile's row when a creator has two profiles in the campaign", async () => {
+    const { service, prisma } = makePayoutService();
+    prisma.formatDeliverable.findMany.mockResolvedValue([]);
+
+    await service.payoutCampaign("campaign-1", "creator-b", "profile-2");
+
+    expect(prisma.formatDeliverable.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          participation: { campaignId: "campaign-1", creatorId: "creator-b", creatorProfileId: "profile-2" },
+        }),
+      }),
+    );
+  });
+});
+
+describe("AdminService team members", () => {
+  function setup() {
+    const prisma = {
+      user: { findUnique: vi.fn(), create: vi.fn(), update: vi.fn(), delete: vi.fn() },
+      staffBrandAssignment: { deleteMany: vi.fn() },
+      refreshToken: { updateMany: vi.fn() },
+      passwordResetToken: { updateMany: vi.fn().mockResolvedValue({}), create: vi.fn().mockResolvedValue({}) },
+      $transaction: vi.fn().mockResolvedValue([]),
+    };
+    const email = { sendStaffWelcome: vi.fn().mockResolvedValue(undefined) };
+    const activityLog = { log: vi.fn().mockResolvedValue(undefined) };
+    const service = new AdminService(
+      prisma as never, {} as never, email as never, {} as never, activityLog as never,
+      {} as never, {} as never, {} as never, {} as never, {} as never, {} as never, {} as never, {} as never,
+    );
+    return { service, prisma, email };
+  }
+
+  it("emails a set-password link, never the password", async () => {
+    const { service, prisma, email } = setup();
+    prisma.user.findUnique.mockResolvedValue(null);
+    prisma.user.create.mockResolvedValue({ id: "s1", email: "t@x.com", displayName: "T", createdAt: new Date(), isActive: true });
+
+    await service.createTeamMember({ name: "T", email: "t@x.com", password: "Secret-Pass-123" });
+
+    expect(prisma.passwordResetToken.create).toHaveBeenCalled();
+    const [, , token] = email.sendStaffWelcome.mock.calls[0];
+    expect(token).not.toBe("Secret-Pass-123");
+    expect(JSON.stringify(email.sendStaffWelcome.mock.calls)).not.toContain("Secret-Pass-123");
+  });
+
+  it("signs a deactivated member out everywhere", async () => {
+    const { service, prisma } = setup();
+    prisma.user.findUnique.mockResolvedValue({ id: "s1", role: "staff", isActive: true });
+    await service.deactivateStaff("s1");
+    expect(prisma.refreshToken.updateMany).toHaveBeenCalledWith({ where: { userId: "s1", revokedAt: null }, data: { revokedAt: expect.any(Date) } });
+  });
+
+  it("keeps a removed member's record (and activity log) instead of deleting it", async () => {
+    const { service, prisma } = setup();
+    prisma.user.findUnique.mockResolvedValue({ id: "s1", role: "staff", isActive: false, displayName: "Asha" });
+    await service.deleteStaff("s1");
+    expect(prisma.user.delete).not.toHaveBeenCalled();
+    expect(prisma.user.update).toHaveBeenCalledWith({
+      where: { id: "s1" },
+      data: { isActive: false, email: null, passwordHash: null, displayName: "Asha (removed)" },
+    });
+  });
 });
