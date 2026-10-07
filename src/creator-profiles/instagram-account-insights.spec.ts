@@ -62,6 +62,7 @@ function setup(fake = metaFake(), snapshot: { collectedAt: Date; rawMetrics: unk
   const prisma = {
     instagramConnection: {
       findFirst: vi.fn().mockResolvedValue({ id: "conn-1", userId: "creator-1", creatorProfileId: "prof-1", platformUserId: "17841", isConnected }),
+      findMany: vi.fn().mockResolvedValue([]),
       update: vi.fn().mockReturnValue("conn-update"),
     },
     socialAccountInsightSnapshot: {
@@ -238,13 +239,11 @@ describe("nightly sync at 12 AM", () => {
 
   it("refreshes every connected account and keeps going past a failure", async () => {
     const { service, prisma } = setup();
-    Object.assign(prisma.instagramConnection, {
-      findMany: vi.fn().mockResolvedValue([
-        { id: "c1", userId: "u1" },
-        { id: "c2", userId: "u2" },
-        { id: "c3", userId: "u3" },
-      ]),
-    });
+    prisma.instagramConnection.findMany.mockResolvedValue([
+      { id: "c1", userId: "u1" },
+      { id: "c2", userId: "u2" },
+      { id: "c3", userId: "u3" },
+    ]);
     service.nightlyPauseMs = 0;
     const getReport = vi
       .spyOn(service, "getReport")
