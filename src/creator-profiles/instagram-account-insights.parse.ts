@@ -21,7 +21,7 @@ export type UnavailableReason = "permission" | "threshold" | "not_supported" | "
 export type UnavailableSection = { section: string; reason: UnavailableReason; message: string };
 
 /** Why Meta refused a call, in words an admin can act on. */
-export function classifyGraphError(error: GraphError | undefined, followerCount: number): {
+export function classifyGraphError(error: GraphError | undefined, followerCount: number, section = ""): {
   reason: UnavailableReason;
   message: string;
 } {
@@ -35,6 +35,14 @@ export function classifyGraphError(error: GraphError | undefined, followerCount:
     };
   }
   if (followerCount < 100 || /not enough|minimum|at least 100/i.test(raw)) {
+    // The engaged-audience breakdown has its own bar: enough people have to
+    // have interacted in the period, however many followers the account has.
+    if (section.startsWith("engaged_") && followerCount >= 100) {
+      return {
+        reason: "threshold",
+        message: "Not enough people liked, commented, shared or saved this creator's posts in the last 30 days — Meta only breaks the engaged audience down above a minimum.",
+      };
+    }
     return {
       reason: "threshold",
       message: "Meta only shares this for accounts with at least 100 followers.",
@@ -168,4 +176,10 @@ export function contentMix(media: MediaItem[]): Array<{ kind: ContentKind; count
   const counts = new Map<ContentKind, number>();
   for (const m of media) counts.set(contentKind(m), (counts.get(contentKind(m)) ?? 0) + 1);
   return [...counts.entries()].map(([kind, count]) => ({ kind, count })).sort((a, b) => b.count - a.count);
+}
+
+/** Instagram's answer for a post made before the account was converted to a
+ * business/creator account — it simply has no insights for those. */
+export function postedBeforeBusinessAccount(error: GraphError | undefined): boolean {
+  return error?.error_subcode === 2108006 || /before the most recent time .*converted to a business/i.test(error?.message ?? "");
 }
