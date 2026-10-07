@@ -14,6 +14,7 @@ import { SupportModule } from "../support/support.module";
 import { WalletModule } from "../wallet/wallet.module";
 import { AdminController } from "./admin.controller";
 import { AdminService } from "./admin.service";
+import { CampaignReportService } from "./campaign-report.service";
 
 @Module({
   imports: [
@@ -31,6 +32,6 @@ import { AdminService } from "./admin.service";
     WalletModule,
   ],
   controllers: [AdminController],
-  providers: [AdminService],
+  providers: [AdminService, CampaignReportService],
 })
 export class AdminModule {}

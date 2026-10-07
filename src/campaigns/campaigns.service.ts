@@ -397,7 +397,8 @@ export class CampaignsService {
         sourceAssets: dto.sourceAssets as Prisma.InputJsonValue | undefined,
         sourceVideoRequirement: dto.sourceVideoRequirement,
         sourceAudioRequirement: dto.sourceAudioRequirement,
-        autoReviewEnabled: dto.autoReviewEnabled,
+        // Off unless someone turns it on for this campaign.
+        autoReviewEnabled: dto.autoReviewEnabled ?? false,
         referenceAssets: dto.referenceAssets as Prisma.InputJsonValue | undefined,
         coverImageUrl: dto.coverImageUrl,
         productUrl: dto.productUrl,
@@ -999,47 +1000,6 @@ export class CampaignsService {
     }
   }
 
-  /** Public, unauthenticated read-only view — excludes rate/budget/payout ("commercials"). */
-  async getPublicView(campaignId: string) {
-    const campaign = await this.prisma.campaign.findUnique({
-      where: { id: campaignId },
-      include: {
-        brandProfile: { select: { companyName: true, logoUrl: true } },
-      },
-    });
-
-    if (!campaign || isUnpublished(campaign.status)) {
-      throw new NotFoundException({
-        code: "NOT_FOUND",
-        message: "Campaign not available",
-      });
-    }
-
-    return {
-      id: campaign.id,
-      title: campaign.title,
-      category: campaign.category,
-      platform: campaign.platform,
-      platforms: campaign.platforms,
-      locationType: campaign.locationType,
-      targetStates: campaign.targetStates,
-      status: campaign.status,
-      brief: campaign.brief,
-      briefHook: campaign.briefHook,
-      doRules: campaign.doRules,
-      avoidRules: campaign.avoidRules,
-      sourceAssets: campaign.sourceAssets,
-      sourceVideoRequirement: campaign.sourceVideoRequirement,
-      sourceAudioRequirement: campaign.sourceAudioRequirement,
-      referenceAssets: campaign.referenceAssets,
-      coverImageUrl: campaign.coverImageUrl,
-      productUrl: campaign.productUrl,
-      startDate: campaign.startDate?.toISOString() ?? null,
-      brandCompanyName: campaign.brandProfile?.companyName ?? null,
-      brandLogoUrl: campaign.brandProfile?.logoUrl ?? null,
-    };
-  }
-
   formatCampaignForCreator(
     c: Parameters<CampaignsService["formatCampaign"]>[0] & {
       brandProfile?: { companyName: string; logoUrl: string | null } | null;
@@ -1142,7 +1102,7 @@ export class CampaignsService {
       sourceAssets: c.sourceAssets,
       sourceVideoRequirement: c.sourceVideoRequirement ?? SourceAssetRequirement.mandatory,
       sourceAudioRequirement: c.sourceAudioRequirement ?? SourceAssetRequirement.not_required,
-      autoReviewEnabled: c.autoReviewEnabled ?? true,
+      autoReviewEnabled: c.autoReviewEnabled ?? false,
       referenceAssets: c.referenceAssets,
       coverImageUrl: c.coverImageUrl,
       productUrl: c.productUrl,

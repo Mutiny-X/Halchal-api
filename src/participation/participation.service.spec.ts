@@ -77,6 +77,7 @@ function makeAutoReview() {
 function makeInstagramOAuth() {
   return {
     getMediaInsightsForPost: vi.fn().mockResolvedValue(null),
+    getFollowerCount: vi.fn().mockResolvedValue(null),
   };
 }
 
@@ -811,6 +812,7 @@ describe("ParticipationService", () => {
         status: FormatDeliverableStatus.draft_approved,
         participation: {
           creatorId: "creator-1",
+          creatorProfileId: "profile-1",
           campaign: { status: CampaignStatus.live },
         },
       });
@@ -835,6 +837,7 @@ describe("ParticipationService", () => {
         rejectionReason: "resubmit",
         participation: {
           creatorId: "creator-1",
+          creatorProfileId: "profile-1",
           campaign: { status: CampaignStatus.live },
         },
       });

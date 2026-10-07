@@ -8,6 +8,7 @@ import {
   Post,
   Query,
   Req,
+  Res,
   UploadedFile,
   UseGuards,
   UseInterceptors,
@@ -16,6 +17,7 @@ import { FileInterceptor } from "@nestjs/platform-express";
 import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
 import { StaffAccessLevel, SupportTicketStatus, UserRole } from "@prisma/client";
 import { IsBoolean, IsEmail, IsEnum, IsInt, IsOptional, IsString, MaxLength, Min, MinLength } from "class-validator";
+import type { Response } from "express";
 import { memoryStorage } from "multer";
 
 import { CampaignInviteService } from "../auth/campaign-invite.service";
@@ -43,6 +45,7 @@ import { CreateFaqDto, ReorderFaqsDto, UpdateFaqDto } from "../faqs/dto/faq.dto"
 import { SendBulkNotificationDto } from "../notifications/dto/bulk-notification.dto";
 import { RespondSupportTicketDto } from "../support/dto/support.dto";
 import { AdminService } from "./admin.service";
+import { CampaignReportService } from "./campaign-report.service";
 
 
 class RejectCampaignDto {
@@ -166,6 +169,7 @@ export class AdminController {
     private readonly storage: ObjectStorageService,
     private readonly campaigns: CampaignsService,
     private readonly instagramInsights: InstagramAccountInsightsService,
+    private readonly campaignReport: CampaignReportService,
   ) {}
 
   @Get("me/permissions")
@@ -551,6 +555,38 @@ export class AdminController {
     @Body() dto: SetClipperIntakeDto,
   ) {
     return this.admin.setCampaignClipperIntake(campaignId, dto.extraClipperAllowance);
+  }
+
+  @Get("campaigns/:id/report")
+  @AdminSectionRoute("campaigns")
+  async generateCampaignReport(
+    @CurrentUser() user: AuthJwtPayload,
+    @Param("id") campaignId: string,
+    @Res() res: Response,
+  ) {
+    const generatedByName = user.email ?? user.phone ?? "Halchal Admin";
+    const pdf = await this.campaignReport.generatePdf(campaignId, generatedByName);
+    res.set({
+      "Content-Type": "application/pdf",
+      "Content-Disposition": `attachment; filename="campaign-report-${campaignId}.pdf"`,
+    });
+    res.send(pdf);
+  }
+
+  @Get("campaigns/:id/report/ledger")
+  @AdminSectionRoute("campaigns")
+  async generateCampaignLedger(
+    @CurrentUser() user: AuthJwtPayload,
+    @Param("id") campaignId: string,
+    @Res() res: Response,
+  ) {
+    const generatedByName = user.email ?? user.phone ?? "Halchal Admin";
+    const csv = await this.campaignReport.generateLedgerCsv(campaignId, generatedByName);
+    res.set({
+      "Content-Type": "text/csv; charset=utf-8",
+      "Content-Disposition": `attachment; filename="campaign-ledger-${campaignId}.csv"`,
+    });
+    res.send(csv);
   }
 
   @Patch("campaigns/:id/pool-overflow")

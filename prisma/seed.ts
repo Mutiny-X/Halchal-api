@@ -23,6 +23,14 @@ const demoCreators = [
 ] as const;
 
 async function main(): Promise<void> {
+  if (process.env.NODE_ENV === "production") {
+    throw new Error(
+      "Refusing to seed demo creators (with a known, fixed OTP) into a " +
+        "production database. Unset NODE_ENV or run this against a " +
+        "non-production DATABASE_URL instead.",
+    );
+  }
+
   for (const creator of demoCreators) {
     const user = await prisma.user.upsert({
       where: { phone: creator.phone },
