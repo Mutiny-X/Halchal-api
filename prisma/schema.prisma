@@ -654,7 +654,7 @@ model Campaign {
 
   complianceChecklist Json? @map("compliance_checklist")
 
-  autoReviewEnabled Boolean @default(true) @map("auto_review_enabled")
+  autoReviewEnabled Boolean @default(false) @map("auto_review_enabled")
 
   startDate DateTime? @map("start_date")
 

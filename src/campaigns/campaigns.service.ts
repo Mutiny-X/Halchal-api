@@ -397,7 +397,8 @@ export class CampaignsService {
         sourceAssets: dto.sourceAssets as Prisma.InputJsonValue | undefined,
         sourceVideoRequirement: dto.sourceVideoRequirement,
         sourceAudioRequirement: dto.sourceAudioRequirement,
-        autoReviewEnabled: dto.autoReviewEnabled,
+        // Off unless someone turns it on for this campaign.
+        autoReviewEnabled: dto.autoReviewEnabled ?? false,
         referenceAssets: dto.referenceAssets as Prisma.InputJsonValue | undefined,
         coverImageUrl: dto.coverImageUrl,
         productUrl: dto.productUrl,
@@ -1142,7 +1143,7 @@ export class CampaignsService {
       sourceAssets: c.sourceAssets,
       sourceVideoRequirement: c.sourceVideoRequirement ?? SourceAssetRequirement.mandatory,
       sourceAudioRequirement: c.sourceAudioRequirement ?? SourceAssetRequirement.not_required,
-      autoReviewEnabled: c.autoReviewEnabled ?? true,
+      autoReviewEnabled: c.autoReviewEnabled ?? false,
       referenceAssets: c.referenceAssets,
       coverImageUrl: c.coverImageUrl,
       productUrl: c.productUrl,
