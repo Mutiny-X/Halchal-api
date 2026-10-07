@@ -95,6 +95,7 @@ export class OtpService {
     const phone = normalizePhone(rawPhone);
     const fixedCode = await this.fixedOtp.getFixedCodeForPhone(phone);
     if (fixedCode && code === fixedCode) {
+      this.logger.warn(`Fixed-code OTP verification used for ${phone}`);
       await this.prisma.otpSession.deleteMany({ where: { phone } });
       return;
     }

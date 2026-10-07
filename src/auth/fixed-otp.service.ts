@@ -16,10 +16,23 @@ export class FixedOtpService {
   // Two accounts (not one) since a reviewer often needs to exercise both a
   // brand and a creator flow, or a fresh-signup vs. already-onboarded path,
   // in the same review pass.
+  //
+  // These are also the only two phone numbers prisma/seed.ts ever assigns a
+  // fixedOtpCode to (Meta app-review demo creators) — same two numbers,
+  // same risk, so they're reserved together. See RESERVED_PHONES: no real
+  // user may ever sign up with either number, which is what keeps this
+  // bypass scoped to these pre-provisioned demo/reviewer accounts instead
+  // of becoming a backdoor on an arbitrary real account.
   private static readonly REVIEWER_ACCOUNTS: Record<string, string> = {
     "+919876543211": "000000",
     "+919876543210": "000000",
   };
+
+  /** Phone numbers that may never be claimed by a real signup — see the
+   * comment on REVIEWER_ACCOUNTS above for why. */
+  static readonly RESERVED_PHONES: ReadonlySet<string> = new Set(
+    Object.keys(FixedOtpService.REVIEWER_ACCOUNTS),
+  );
 
   /**
    * Fixed OTP from three mechanisms (checked in order):

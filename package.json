@@ -54,6 +54,7 @@
     "pino": "^9.6.0",
     "pino-http": "^10.4.0",
     "prisma": "^6.5.0",
+    "puppeteer": "^24.10.0",
     "reflect-metadata": "^0.2.2",
     "resend": "^6.12.4",
     "rxjs": "^7.8.2",

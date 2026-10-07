@@ -981,6 +981,15 @@ model FormatDeliverable {
 
   liveSubmittedAt DateTime? @map("live_submitted_at")
 
+  /** The creator's Instagram follower count at the moment this deliverable's
+   * live-proof link was submitted — fetched fresh from the Graph API right
+   * then (see ParticipationService.submitLiveProof), not copied from
+   * InstagramConnection.followerCount, which only ever holds the latest
+   * synced value. Null for non-Instagram platforms, or when the live fetch
+   * failed (never blocks the submission itself). Used by the campaign
+   * report's per-reel ledger export. */
+  followerCountAtPost Int? @map("follower_count_at_post")
+
   viewCount Int @default(0) @map("view_count")
 
   reach Int @default(0)

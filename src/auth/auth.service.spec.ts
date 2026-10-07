@@ -107,6 +107,27 @@ describe("AuthService.verifyCreatorOtp", () => {
     expect(result.user.id).toBe("user-1");
   });
 
+  it("throws CONFLICT when signing up fresh on a reserved reviewer/demo phone number", async () => {
+    const { service, prisma } = makeAuthService();
+    prisma.user.findUnique.mockResolvedValue(null);
+
+    await expect(
+      service.verifyCreatorOtp({
+        phone: "+919876543210",
+        code: "000000",
+        displayName: "Someone Else",
+        email: "someone-else@viralcut.test",
+      }),
+    ).rejects.toSatisfy((error: unknown) => {
+      expect(error).toBeInstanceOf(ConflictException);
+      expect((error as ConflictException).getResponse()).toMatchObject({
+        code: "CONFLICT",
+      });
+      return true;
+    });
+    expect(prisma.user.create).not.toHaveBeenCalled();
+  });
+
   it("throws WRONG_PORTAL when phone belongs to a brand user", async () => {
     const { service, prisma } = makeAuthService();
     prisma.user.findUnique.mockResolvedValue({
