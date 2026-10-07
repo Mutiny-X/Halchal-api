@@ -1,4 +1,5 @@
 import { ConflictException, Injectable, Logger, NotFoundException } from "@nestjs/common";
+import { Cron } from "@nestjs/schedule";
 import { ConfigService } from "@nestjs/config";
 import { Prisma } from "@prisma/client";
 
@@ -27,8 +28,11 @@ import {
 import { InstagramOAuthService } from "./instagram-oauth.service";
 
 export const ACCOUNT_INSIGHTS_SOURCE = "instagram_account_insights";
-/** A cached report is reused for this long before it's fetched again. */
-const FRESH_FOR_MS = 6 * 60 * 60 * 1000;
+/** A stored report counts as current for a day: the nightly job refreshes
+ * every connected account at 12 AM (India), so opening a creator's page
+ * shows that run instead of calling Meta again. A couple of spare hours
+ * cover a slow or late run. "Sync now" still fetches straight away. */
+const FRESH_FOR_MS = 26 * 60 * 60 * 1000;
 /** "Sync now" can't hit Meta more often than this per account. */
 const MIN_REFRESH_GAP_MS = 5 * 60 * 1000;
 const PERIOD_DAYS = 30;
@@ -108,6 +112,49 @@ export class InstagramAccountInsightsService {
 
   /** Swappable in tests. */
   fetchImpl: typeof fetch = (...args) => fetch(...args);
+  /** Pause between accounts in the nightly run; swappable in tests. */
+  nightlyPauseMs = 2000;
+  private nightlyRunning = false;
+
+  /**
+   * Every night at 12 AM (India): refresh the insights of every creator with
+   * Instagram connected, so admins see yesterday's numbers without pressing
+   * "Sync now". One account at a time with a short pause (each sync makes
+   * dozens of Meta calls), and one account failing never stops the rest.
+   */
+  @Cron("0 0 0 * * *", { timeZone: "Asia/Kolkata" })
+  async syncAllConnectedNightly(): Promise<{ synced: number; failed: number }> {
+    if (this.nightlyRunning) {
+      this.logger.warn("Nightly Instagram insights sync is still running from before — skipping this start");
+      return { synced: 0, failed: 0 };
+    }
+    this.nightlyRunning = true;
+    let synced = 0;
+    let failed = 0;
+    try {
+      const connections = await this.prisma.instagramConnection.findMany({
+        where: { isConnected: true },
+        select: { id: true, userId: true },
+        orderBy: { createdAt: "asc" },
+      });
+      for (const [i, c] of connections.entries()) {
+        try {
+          await this.getReport(c.userId, c.id, { refresh: true });
+          synced += 1;
+        } catch (err) {
+          failed += 1;
+          this.logger.warn(`Nightly Instagram insights sync failed for connection ${c.id}: ${(err as Error).message}`);
+        }
+        if (i < connections.length - 1 && this.nightlyPauseMs > 0) {
+          await new Promise((r) => setTimeout(r, this.nightlyPauseMs));
+        }
+      }
+      this.logger.log(`Nightly Instagram insights sync: ${synced} synced, ${failed} failed`);
+      return { synced, failed };
+    } finally {
+      this.nightlyRunning = false;
+    }
+  }
 
   private get graphBase(): string {
     return `https://graph.instagram.com/${this.config.get("INSTAGRAM_GRAPH_API_VERSION", { infer: true }) ?? "v23.0"}`;
