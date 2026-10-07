@@ -226,3 +226,47 @@ describe("what Instagram didn't share — wording", () => {
     expect(postedBeforeBusinessAccount({ code: 190, message: "token expired" })).toBe(false);
   });
 });
+
+describe("nightly sync at 12 AM", () => {
+  it("is scheduled for midnight India time", () => {
+    const meta = Reflect.getMetadata(
+      "SCHEDULE_CRON_OPTIONS",
+      InstagramAccountInsightsService.prototype.syncAllConnectedNightly,
+    );
+    expect(meta).toMatchObject({ cronTime: "0 0 0 * * *", timeZone: "Asia/Kolkata" });
+  });
+
+  it("refreshes every connected account and keeps going past a failure", async () => {
+    const { service, prisma } = setup();
+    Object.assign(prisma.instagramConnection, {
+      findMany: vi.fn().mockResolvedValue([
+        { id: "c1", userId: "u1" },
+        { id: "c2", userId: "u2" },
+        { id: "c3", userId: "u3" },
+      ]),
+    });
+    service.nightlyPauseMs = 0;
+    const getReport = vi
+      .spyOn(service, "getReport")
+      .mockResolvedValueOnce({} as never)
+      .mockRejectedValueOnce(new Error("token expired"))
+      .mockResolvedValueOnce({} as never);
+
+    const result = await service.syncAllConnectedNightly();
+
+    expect(prisma.instagramConnection.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { isConnected: true } }),
+    );
+    expect(getReport).toHaveBeenCalledTimes(3);
+    expect(getReport).toHaveBeenCalledWith("u2", "c2", { refresh: true });
+    expect(result).toEqual({ synced: 2, failed: 1 });
+  });
+
+  it("reuses last night's report when someone opens the page the next morning", async () => {
+    const tenHoursAgo = new Date(Date.now() - 10 * 60 * 60 * 1000);
+    const { service, fake } = setup(metaFake(), { collectedAt: tenHoursAgo, rawMetrics: { cachedReport: true } });
+    const res = await service.getReport("creator-1", "conn-1");
+    expect(res.cached).toBe(true);
+    expect(fake.fn).not.toHaveBeenCalled();
+  });
+});
