@@ -17,6 +17,7 @@ import { PrismaService } from "../prisma/prisma.service";
 import { EmailService } from "../notifications/email.service";
 import { InAppNotificationService } from "../notifications/in-app-notification.service";
 import type { AuthJwtPayload, AuthTokens } from "./auth.types";
+import { FixedOtpService } from "./fixed-otp.service";
 import { hashRefreshToken, normalizePhone, OtpService } from "./otp.service";
 import type { AdminLoginDto } from "./dto/admin-auth.dto";
 import type { BrandLoginDto, BrandRegisterDto } from "./dto/brand-auth.dto";
@@ -272,6 +273,17 @@ export class AuthService {
   private async assertCreatorSignupFieldsAvailable(
     dto: CreatorOtpVerifyDto,
   ): Promise<void> {
+    // These numbers are reserved for the hardcoded App Store/Meta reviewer
+    // + demo-seed accounts (see FixedOtpService) — a real signup must never
+    // land on one, since that phone number's OTP is a well-known static
+    // code in every environment.
+    if (FixedOtpService.RESERVED_PHONES.has(dto.phone)) {
+      throw new ConflictException({
+        code: "CONFLICT",
+        message: "This phone number can't be used to sign up.",
+      });
+    }
+
     if (dto.email) {
       const email = dto.email.toLowerCase();
       const existing = await this.prisma.user.findUnique({ where: { email } });

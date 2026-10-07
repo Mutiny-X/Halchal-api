@@ -553,6 +553,17 @@ export class ParticipationService {
       });
     }
 
+    // Snapshot the creator's follower count right now, for the campaign
+    // report's per-reel ledger ("followers at time of posting") — a fresh
+    // fetch, not whatever's cached on InstagramConnection, since the whole
+    // point of this column is accuracy at this specific moment. Instagram
+    // only, and never allowed to block the submission itself if it fails.
+    const followerCountAtPost = deliverable.platform.startsWith("instagram")
+      ? await this.instagramOAuth
+          .getFollowerCount(deliverable.participation.creatorProfileId)
+          .catch(() => null)
+      : null;
+
     const updated = await this.prisma.formatDeliverable.update({
       where: { id: deliverableId },
       data: {
@@ -560,6 +571,7 @@ export class ParticipationService {
         status: FormatDeliverableStatus.proof_under_review,
         liveSubmittedAt: new Date(),
         rejectionReason: null,
+        ...(followerCountAtPost !== null && { followerCountAtPost }),
       },
     });
 

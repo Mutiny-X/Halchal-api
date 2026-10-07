@@ -76,6 +76,28 @@ type InstagramMediaResponse = {
   error?: InstagramGraphError;
 };
 
+/** One value per distinct dimension value (e.g. age band, city name) within
+ * a single breakdown dimension — counts, not percentages; see
+ * aggregateDemographicBreakdown for how these get normalized for display. */
+export type FollowerDemographicsBreakdown = {
+  age: Record<string, number>;
+  gender: Record<string, number>;
+  city: Record<string, number>;
+  country: Record<string, number>;
+};
+
+type FollowerDemographicsResponse = {
+  data?: Array<{
+    total_value?: {
+      breakdowns?: Array<{
+        dimension_keys?: string[];
+        results?: Array<{ dimension_values?: string[]; value?: number }>;
+      }>;
+    };
+  }>;
+  error?: InstagramGraphError;
+};
+
 type InstagramInsights = {
   igUserId: string;
   username: string;
@@ -668,6 +690,86 @@ export class InstagramOAuthService {
       },
     });
     return refreshed.accessToken;
+  }
+
+  /** The connected account's current follower count, fetched fresh —
+   * deliberately not read off InstagramConnection.followerCount, which only
+   * holds whatever was last synced and can be weeks stale. Used to snapshot
+   * "followers at time of posting" the moment a creator submits a live-proof
+   * link (see ParticipationService.submitLiveProof), so the campaign
+   * report's per-reel ledger reflects their reach at that specific moment,
+   * not today's number. Returns null on any failure — this must never block
+   * a live-proof submission. */
+  async getFollowerCount(creatorProfileId: string): Promise<number | null> {
+    try {
+      const connection = await this.prisma.instagramConnection.findUnique({
+        where: { creatorProfileId },
+      });
+      if (!connection || !connection.isConnected) return null;
+
+      const accessToken = await this.getValidAccessToken(creatorProfileId);
+      const token = encodeURIComponent(accessToken);
+      const profile = await this.instagramGraphFetch<{
+        followers_count?: number;
+        error?: InstagramGraphError;
+      }>(`${this.graphBase}/me?fields=followers_count&access_token=${token}`);
+      return typeof profile.followers_count === "number" ? profile.followers_count : null;
+    } catch (err) {
+      this.logger.warn(`getFollowerCount failed for profile ${creatorProfileId}: ${err}`);
+      return null;
+    }
+  }
+
+  /** Account-level follower demographics (age, gender, city, country) via
+   * Instagram's follower_demographics insights metric — requires the
+   * connection's token to carry instagram_business_manage_insights (same
+   * scope getMediaInsightsForPost needs) and, per Meta's own documentation,
+   * a minimum follower count before the account qualifies for this metric
+   * at all. This describes the account's FOLLOWER base, not viewers of any
+   * specific post — Instagram has no per-post viewer-demographics API, for
+   * anyone, at any permission level. Used by the campaign report's
+   * demographics section, aggregated across every participating creator.
+   *
+   * One call per breakdown dimension (age/gender/city/country) rather than
+   * a combined request — the safer choice against an unconfirmed API
+   * surface. The exact request/response shape here is built from Meta's
+   * documented total_value/breakdown pattern used elsewhere in their
+   * Insights API, but has not been exercised against a live account yet;
+   * treat the first real call in production as the actual validation, and
+   * expect this to need adjustment if Instagram's response shape differs. */
+  async getFollowerDemographics(
+    creatorProfileId: string,
+  ): Promise<FollowerDemographicsBreakdown | null> {
+    try {
+      const connection = await this.prisma.instagramConnection.findUnique({
+        where: { creatorProfileId },
+      });
+      if (!connection || !connection.isConnected) return null;
+
+      const accessToken = await this.getValidAccessToken(creatorProfileId);
+      const token = encodeURIComponent(accessToken);
+      const result: FollowerDemographicsBreakdown = { age: {}, gender: {}, city: {}, country: {} };
+
+      for (const dimension of ["age", "gender", "city", "country"] as const) {
+        const res = await this.instagramGraphFetch<FollowerDemographicsResponse>(
+          `${this.graphBase}/${encodeURIComponent(connection.platformUserId)}/insights` +
+            `?metric=follower_demographics&period=lifetime&metric_type=total_value` +
+            `&breakdown=${dimension}&access_token=${token}`,
+        );
+        const buckets = res.data?.[0]?.total_value?.breakdowns?.[0]?.results ?? [];
+        for (const bucket of buckets) {
+          const key = bucket.dimension_values?.[0];
+          if (key && typeof bucket.value === "number") {
+            result[dimension][key] = (result[dimension][key] ?? 0) + bucket.value;
+          }
+        }
+      }
+
+      return result;
+    } catch (err) {
+      this.logger.warn(`getFollowerDemographics failed for profile ${creatorProfileId}: ${err}`);
+      return null;
+    }
   }
 
   /** Real, first-party metrics for one specific live post via Instagram's

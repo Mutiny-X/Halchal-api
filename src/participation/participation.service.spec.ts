@@ -75,6 +75,7 @@ function makeAutoReview() {
 function makeInstagramOAuth() {
   return {
     getMediaInsightsForPost: vi.fn().mockResolvedValue(null),
+    getFollowerCount: vi.fn().mockResolvedValue(null),
   };
 }
 
@@ -804,9 +805,11 @@ describe("ParticipationService", () => {
     it("accepts live proof when draft_approved", async () => {
       prisma.formatDeliverable.findFirst.mockResolvedValue({
         id: "d1",
+        platform: "instagram_reel",
         status: FormatDeliverableStatus.draft_approved,
         participation: {
           creatorId: "creator-1",
+          creatorProfileId: "profile-1",
           campaign: { status: CampaignStatus.live },
         },
       });
@@ -826,10 +829,12 @@ describe("ParticipationService", () => {
     it("accepts a resubmission after proof_rejected and clears the old rejection reason", async () => {
       prisma.formatDeliverable.findFirst.mockResolvedValue({
         id: "d1",
+        platform: "instagram_reel",
         status: FormatDeliverableStatus.proof_rejected,
         rejectionReason: "resubmit",
         participation: {
           creatorId: "creator-1",
+          creatorProfileId: "profile-1",
           campaign: { status: CampaignStatus.live },
         },
       });
