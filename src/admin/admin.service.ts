@@ -34,6 +34,7 @@ const ACTION_LABELS: Record<string, string> = {
   "staff.deactivated": "Account deactivated",
   "staff.reactivated": "Account reactivated",
   "staff.removed": "Account removed",
+  "payout.paid": "Marked a payout as paid",
   "task.assigned": "Was assigned a task",
   "task.completed": "Completed a task",
 };
@@ -1080,7 +1081,7 @@ export class AdminService {
   /** `creatorProfileId` narrows a per-creator payout to one payout row —
    * the same person's two profiles in a campaign are listed (and confirmed)
    * as separate rows, so paying one must not pay the other. */
-  async payoutCampaign(campaignId: string, creatorId?: string, creatorProfileId?: string) {
+  async payoutCampaign(campaignId: string, creatorId?: string, creatorProfileId?: string, paidByUserId?: string) {
     const deliverables = await this.prisma.formatDeliverable.findMany({
       where: {
         status: FormatDeliverableStatus.proof_approved,
@@ -1175,6 +1176,16 @@ export class AdminService {
       }
 
       if (!paidNow) continue;
+
+      // Record who marked it paid, so it shows next to the clip like reviews do.
+      if (paidByUserId) {
+        await this.activityLog.log(paidByUserId, "payout.paid", {
+          targetType: "FormatDeliverable",
+          targetId: d.id,
+          brandProfileId: brandProfileId ?? undefined,
+          metadata: { campaignTitle: title, platform: d.platform, amountPaise },
+        });
+      }
 
       this.realtime.emitDeliverablePaid({
         deliverableId: d.id,

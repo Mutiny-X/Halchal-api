@@ -527,6 +527,7 @@ model ActivityLog {
   @@index([actorUserId])
   @@index([brandProfileId])
   @@index([createdAt])
+  @@index([targetType, targetId])
   @@map("activity_logs")
 }
 
