@@ -28,6 +28,8 @@ function makePrisma() {
       findUnique: vi.fn(),
       findMany: vi.fn(),
       update: vi.fn(),
+      updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+      findUniqueOrThrow: vi.fn(),
       count: vi.fn(),
     },
     deliverableRejectionEvent: {
@@ -713,7 +715,7 @@ describe("ParticipationService", () => {
         participationId: "part-1",
         platform: "instagram_reel",
       });
-      prisma.formatDeliverable.update.mockResolvedValue({
+      prisma.formatDeliverable.findUniqueOrThrow.mockResolvedValue({
         id: "d1",
         status: FormatDeliverableStatus.under_review,
         draftDriveUrl: "https://drive.google.com/file/d/abc/view",
@@ -785,8 +787,9 @@ describe("ParticipationService", () => {
 
   describe("submitLiveProof", () => {
     it("blocks live proof before approval", async () => {
-      prisma.formatDeliverable.findFirst.mockResolvedValue({
+      prisma.formatDeliverable.findFirst.mockResolvedValueOnce({
         id: "d1",
+        platform: "instagram_reel",
         status: FormatDeliverableStatus.under_review,
         participation: {
           creatorId: "creator-1",
@@ -802,15 +805,16 @@ describe("ParticipationService", () => {
     });
 
     it("accepts live proof when draft_approved", async () => {
-      prisma.formatDeliverable.findFirst.mockResolvedValue({
+      prisma.formatDeliverable.findFirst.mockResolvedValueOnce({
         id: "d1",
+        platform: "instagram_reel",
         status: FormatDeliverableStatus.draft_approved,
         participation: {
           creatorId: "creator-1",
           campaign: { status: CampaignStatus.live },
         },
       });
-      prisma.formatDeliverable.update.mockResolvedValue({
+      prisma.formatDeliverable.findUniqueOrThrow.mockResolvedValue({
         id: "d1",
         status: FormatDeliverableStatus.live_submitted,
         livePostUrl: "https://instagram.com/reel/1",
@@ -824,8 +828,9 @@ describe("ParticipationService", () => {
     });
 
     it("accepts a resubmission after proof_rejected and clears the old rejection reason", async () => {
-      prisma.formatDeliverable.findFirst.mockResolvedValue({
+      prisma.formatDeliverable.findFirst.mockResolvedValueOnce({
         id: "d1",
+        platform: "instagram_reel",
         status: FormatDeliverableStatus.proof_rejected,
         rejectionReason: "resubmit",
         participation: {
@@ -833,7 +838,7 @@ describe("ParticipationService", () => {
           campaign: { status: CampaignStatus.live },
         },
       });
-      prisma.formatDeliverable.update.mockResolvedValue({
+      prisma.formatDeliverable.findUniqueOrThrow.mockResolvedValue({
         id: "d1",
         status: FormatDeliverableStatus.proof_under_review,
         livePostUrl: "https://instagram.com/reel/2",
@@ -843,7 +848,7 @@ describe("ParticipationService", () => {
         livePostUrl: "https://instagram.com/reel/2",
       });
 
-      expect(prisma.formatDeliverable.update).toHaveBeenCalledWith(
+      expect(prisma.formatDeliverable.updateMany).toHaveBeenCalledWith(
         expect.objectContaining({
           data: expect.objectContaining({ rejectionReason: null }),
         }),
@@ -1745,7 +1750,7 @@ describe("ParticipationService", () => {
         status: FormatDeliverableStatus.under_review,
         participation: { campaign: { id: "camp-1" } },
       });
-      prisma.formatDeliverable.update.mockResolvedValue({
+      prisma.formatDeliverable.findUniqueOrThrow.mockResolvedValue({
         id: "d1",
         status: FormatDeliverableStatus.draft_approved,
         participationId: "part-1",
@@ -1799,7 +1804,8 @@ describe("ParticipationService", () => {
         const tx = {
           deliverableRejectionEvent: { create: vi.fn() },
           formatDeliverable: {
-            update: vi.fn().mockResolvedValue({
+            updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+            findUniqueOrThrow: vi.fn().mockResolvedValue({
               id: "d1",
               status: FormatDeliverableStatus.draft_rejected,
               participationId: "part-1",
@@ -1842,6 +1848,138 @@ describe("ParticipationService", () => {
           "wrong  aspect ratio",
         ),
       ).rejects.toBeInstanceOf(BadRequestException);
+    });
+  });
+
+  describe("proof review", () => {
+    function proofDeliverable(status: FormatDeliverableStatus) {
+      return {
+        id: "d1",
+        status,
+        platform: "instagram_reel",
+        participationId: "part-1",
+        participation: {
+          id: "part-1",
+          creatorId: "creator-1",
+          campaignId: "camp-1",
+          campaign: { id: "camp-1", title: "Camp", brandProfileId: "brand-1" },
+        },
+      };
+    }
+
+    it.each([
+      FormatDeliverableStatus.draft_pending,
+      FormatDeliverableStatus.under_review,
+      FormatDeliverableStatus.draft_approved,
+      FormatDeliverableStatus.proof_approved,
+      FormatDeliverableStatus.proof_rejected,
+    ])("refuses to reject proof that isn't awaiting review (%s)", async (status) => {
+      prisma.formatDeliverable.findUnique.mockResolvedValue(proofDeliverable(status));
+
+      await expect(
+        service.rejectProof("brand-user", UserRole.brand, "d1", "Wrong post"),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(prisma.formatDeliverable.updateMany).not.toHaveBeenCalled();
+    });
+
+    it("requires a real reason to reject proof", async () => {
+      prisma.formatDeliverable.findUnique.mockResolvedValue(
+        proofDeliverable(FormatDeliverableStatus.proof_under_review),
+      );
+
+      await expect(
+        service.rejectProof("brand-user", UserRole.brand, "d1", "   "),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it("rejects proof under review with a trimmed reason", async () => {
+      prisma.formatDeliverable.findUnique.mockResolvedValue(
+        proofDeliverable(FormatDeliverableStatus.proof_under_review),
+      );
+      prisma.formatDeliverable.findUniqueOrThrow.mockResolvedValue({
+        ...proofDeliverable(FormatDeliverableStatus.proof_rejected),
+      });
+
+      const result = await service.rejectProof("brand-user", UserRole.brand, "d1", "  Wrong post  ");
+
+      expect(prisma.formatDeliverable.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: "d1", status: { in: [FormatDeliverableStatus.proof_under_review, FormatDeliverableStatus.live_submitted] } },
+          data: expect.objectContaining({ rejectionReason: "Wrong post" }),
+        }),
+      );
+      expect(result.status).toBe(FormatDeliverableStatus.proof_rejected);
+    });
+
+    it("lets only one of two simultaneous approvals through", async () => {
+      prisma.formatDeliverable.findUnique.mockResolvedValue(
+        proofDeliverable(FormatDeliverableStatus.proof_under_review),
+      );
+      prisma.formatDeliverable.updateMany.mockResolvedValue({ count: 0 });
+
+      await expect(
+        service.approveProof("brand-user", UserRole.brand, "d1"),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(realtime.emitDeliverableLiveProof).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("submitLiveProof link checks", () => {
+    const approved = {
+      id: "d1",
+      platform: "instagram_reel",
+      status: FormatDeliverableStatus.draft_approved,
+      participation: { creatorId: "creator-1", campaign: { status: CampaignStatus.live } },
+    };
+
+    it("refuses a link from another platform", async () => {
+      prisma.formatDeliverable.findFirst.mockResolvedValueOnce(approved);
+
+      await expect(
+        service.submitLiveProof("creator-1", "d1", { livePostUrl: "https://youtube.com/shorts/abc" }),
+      ).rejects.toThrow(/Instagram/);
+      expect(prisma.formatDeliverable.updateMany).not.toHaveBeenCalled();
+    });
+
+    it("refuses a post already submitted elsewhere", async () => {
+      prisma.formatDeliverable.findFirst
+        .mockResolvedValueOnce(approved)
+        .mockResolvedValueOnce({ id: "other" });
+
+      await expect(
+        service.submitLiveProof("creator-1", "d1", { livePostUrl: "https://instagram.com/reel/abc" }),
+      ).rejects.toThrow(/already submitted/);
+      expect(prisma.formatDeliverable.updateMany).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("listDeliverablesForBrand", () => {
+    it("keeps a brand's campaign page to that campaign", async () => {
+      campaignAccess.getBrandProfileIdForUser.mockResolvedValue("brand-1");
+      prisma.formatDeliverable.findMany.mockResolvedValue([]);
+
+      await service.listDeliverablesForBrand("brand-user", UserRole.brand, { campaignId: "camp-1" });
+
+      expect(prisma.formatDeliverable.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: {
+            participation: {
+              campaignId: "camp-1",
+              campaign: { brandProfileId: { in: ["brand-1"] } },
+            },
+          },
+        }),
+      );
+    });
+
+    it("lets an admin see one campaign without a brand filter", async () => {
+      prisma.formatDeliverable.findMany.mockResolvedValue([]);
+
+      await service.listDeliverablesForBrand("admin", UserRole.admin, { campaignId: "camp-1" });
+
+      expect(prisma.formatDeliverable.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { participation: { campaignId: "camp-1" } } }),
+      );
     });
   });
 

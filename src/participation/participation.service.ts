@@ -30,6 +30,14 @@ import { InAppNotificationService } from "../notifications/in-app-notification.s
 import { PrismaService } from "../prisma/prisma.service";
 import { RealtimeService } from "../realtime/realtime.service";
 import { FILLABLE_DELIVERABLE_STATUSES } from "./deliverable-status";
+import {
+  DRAFT_REVIEWABLE,
+  liveLinkProblem,
+  liveLinkVariants,
+  PROOF_FILLABLE,
+  PROOF_REVIEWABLE,
+  transitionDeliverable,
+} from "./deliverable-transition";
 import { DRAFT_URL_MESSAGE, isUploadedFileUrl, isValidDraftUrl } from "./drive-url";
 import { ReviewDeliverableAction } from "./dto/review-deliverable.dto";
 import type { SubmitDraftDto } from "./dto/submit-draft.dto";
@@ -491,16 +499,19 @@ export class ParticipationService {
       });
     }
 
-    const updated = await this.prisma.formatDeliverable.update({
-      where: { id: deliverableId },
-      data: {
+    const updated = await transitionDeliverable(
+      this.prisma,
+      deliverableId,
+      FILLABLE_DELIVERABLE_STATUSES,
+      {
         draftDriveUrl: trimmedUrl,
         status: FormatDeliverableStatus.under_review,
         rejectionReason: null,
         draftSubmittedAt: new Date(),
         listedInMarketplace: dto.listedInMarketplace ?? false,
       },
-    });
+      "This format cannot accept a new draft right now",
+    );
 
     this.realtime.emitDeliverableSubmitted(
       this.deliverableEventPayload(updated, deliverable.participation),
@@ -543,26 +554,43 @@ export class ParticipationService {
       deliverable.participation.campaign.status,
     );
 
-    const proofFillableStatuses: FormatDeliverableStatus[] = [
-      FormatDeliverableStatus.draft_approved,
-      FormatDeliverableStatus.proof_rejected,
-    ];
-    if (!proofFillableStatuses.includes(deliverable.status)) {
+    if (!PROOF_FILLABLE.includes(deliverable.status)) {
       throw new BadRequestException({
         code: "VALIDATION_ERROR",
         message: "Live proof can only be submitted after draft approval",
       });
     }
 
-    const updated = await this.prisma.formatDeliverable.update({
-      where: { id: deliverableId },
-      data: {
-        livePostUrl: dto.livePostUrl.trim(),
+    const livePostUrl = dto.livePostUrl.trim();
+    const linkProblem = liveLinkProblem(deliverable.platform, livePostUrl);
+    if (linkProblem) {
+      throw new BadRequestException({ code: "VALIDATION_ERROR", message: linkProblem });
+    }
+    // One live post earns once: the same link can't be reused for another
+    // format or another campaign.
+    const reused = await this.prisma.formatDeliverable.findFirst({
+      where: { id: { not: deliverableId }, livePostUrl: { in: liveLinkVariants(livePostUrl) } },
+      select: { id: true },
+    });
+    if (reused) {
+      throw new BadRequestException({
+        code: "VALIDATION_ERROR",
+        message: "This post was already submitted for another campaign or format. Each submission needs its own post.",
+      });
+    }
+
+    const updated = await transitionDeliverable(
+      this.prisma,
+      deliverableId,
+      PROOF_FILLABLE,
+      {
+        livePostUrl,
         status: FormatDeliverableStatus.proof_under_review,
         liveSubmittedAt: new Date(),
         rejectionReason: null,
       },
-    });
+      "Live proof can only be submitted after draft approval",
+    );
 
     this.realtime.emitDeliverableLiveProof(
       this.deliverableEventPayload(updated, deliverable.participation),
@@ -725,20 +753,22 @@ export class ParticipationService {
           ? {}
           : { status: FormatDeliverableStatus.under_review };
 
+    // Both conditions go in one `participation` filter. Spreading them as
+    // two separate `participation` keys let the brand filter overwrite the
+    // campaign one, so a brand's campaign page listed clippers from all of
+    // that brand's campaigns.
+    const participationWhere: Prisma.CampaignParticipationWhereInput = {
+      ...(filters?.campaignId ? { campaignId: filters.campaignId } : {}),
+      ...(brandProfileIds
+        ? { campaign: { brandProfileId: { in: brandProfileIds } } }
+        : {}),
+    };
+
     const deliverables = await this.prisma.formatDeliverable.findMany({
       where: {
         ...statusFilter,
-        ...(filters?.campaignId
-          ? {
-              participation: { campaignId: filters.campaignId },
-            }
-          : {}),
-        ...(brandProfileIds
-          ? {
-              participation: {
-                campaign: { brandProfileId: { in: brandProfileIds } },
-              },
-            }
+        ...(Object.keys(participationWhere).length > 0
+          ? { participation: participationWhere }
           : {}),
       },
       include: {
@@ -759,8 +789,11 @@ export class ParticipationService {
           },
         },
       },
-      orderBy: { draftSubmittedAt: "desc" },
-      take: 100,
+      // Newest work first; clippers who haven't submitted yet go last
+      // instead of crowding out real submissions.
+      orderBy: [{ draftSubmittedAt: { sort: "desc", nulls: "last" } }, { id: "asc" }],
+      // One campaign's page needs every clipper, not just the first 100.
+      take: filters?.campaignId ? 2000 : 100,
     });
 
     return deliverables.map((d) => {
@@ -777,6 +810,12 @@ export class ParticipationService {
       status: d.status,
       draftDriveUrl: d.draftDriveUrl,
       draftSubmittedAt: d.draftSubmittedAt?.toISOString() ?? null,
+      draftReviewedAt: d.draftReviewedAt?.toISOString() ?? null,
+      livePostUrl: d.livePostUrl,
+      liveSubmittedAt: d.liveSubmittedAt?.toISOString() ?? null,
+      proofReviewedAt: d.proofReviewedAt?.toISOString() ?? null,
+      rejectionReason: d.rejectionReason,
+      paidAt: d.paidAt?.toISOString() ?? null,
       campaignId: d.participation.campaign.id,
       campaignTitle: d.participation.campaign.title,
       participationId: d.participationId,
@@ -948,23 +987,26 @@ export class ParticipationService {
       { requireWrite: true },
     );
 
-    if (deliverable.status !== FormatDeliverableStatus.under_review) {
+    if (!DRAFT_REVIEWABLE.includes(deliverable.status)) {
       throw new BadRequestException({
         code: "VALIDATION_ERROR",
-        message: "Deliverable is not in a reviewable state",
+        message: "This submission was already reviewed. Refresh to see where it stands.",
       });
     }
 
     if (action === ReviewDeliverableAction.approve) {
-      const updated = await this.prisma.formatDeliverable.update({
-        where: { id: deliverableId },
-        data: {
+      const updated = await transitionDeliverable(
+        this.prisma,
+        deliverableId,
+        DRAFT_REVIEWABLE,
+        {
           status: FormatDeliverableStatus.draft_approved,
           draftReviewedAt: new Date(),
           reviewedByUserId: userId,
           rejectionReason: null,
         },
-      });
+        "This submission was already reviewed. Refresh to see where it stands.",
+      );
       this.realtime.emitDeliverableReviewed(
         this.deliverableEventPayload(updated, deliverable.participation),
       );
@@ -1014,6 +1056,20 @@ export class ParticipationService {
     const reviewedAt = new Date();
 
     const updated = await this.prisma.$transaction(async (tx) => {
+      // Status first: if someone else reviewed it meanwhile, nothing is
+      // written — not even the history row.
+      const rejected = await transitionDeliverable(
+        tx,
+        deliverableId,
+        DRAFT_REVIEWABLE,
+        {
+          status: FormatDeliverableStatus.draft_rejected,
+          rejectionReason: trimmedReason,
+          draftReviewedAt: reviewedAt,
+          reviewedByUserId: userId,
+        },
+        "This submission was already reviewed. Refresh to see where it stands.",
+      );
       await tx.deliverableRejectionEvent.create({
         data: {
           deliverableId,
@@ -1022,16 +1078,7 @@ export class ParticipationService {
           reviewedByUserId: userId,
         },
       });
-
-      return tx.formatDeliverable.update({
-        where: { id: deliverableId },
-        data: {
-          status: FormatDeliverableStatus.draft_rejected,
-          rejectionReason: trimmedReason,
-          draftReviewedAt: reviewedAt,
-          reviewedByUserId: userId,
-        },
-      });
+      return rejected;
     });
 
     this.realtime.emitDeliverableReviewed(
@@ -1293,25 +1340,25 @@ export class ParticipationService {
       { requireWrite: true },
     );
 
-    const reviewable: FormatDeliverableStatus[] = [
-      FormatDeliverableStatus.proof_under_review,
-      FormatDeliverableStatus.live_submitted,
-    ];
-    if (!reviewable.includes(deliverable.status)) {
+    if (!PROOF_REVIEWABLE.includes(deliverable.status)) {
       throw new BadRequestException({
         code: "VALIDATION_ERROR",
         message: "Proof can only be approved when it is under review",
       });
     }
 
-    const updated = await this.prisma.formatDeliverable.update({
-      where: { id: deliverableId },
-      data: {
+    const updated = await transitionDeliverable(
+      this.prisma,
+      deliverableId,
+      PROOF_REVIEWABLE,
+      {
         status: FormatDeliverableStatus.proof_approved,
         proofReviewedAt: new Date(),
         reviewedByUserId: userId,
+        rejectionReason: null,
       },
-    });
+      "Proof can only be approved when it is under review",
+    );
 
     this.realtime.emitDeliverableLiveProof(
       this.deliverableEventPayload(updated, deliverable.participation),
@@ -1350,15 +1397,35 @@ export class ParticipationService {
       { requireWrite: true },
     );
 
-    const updated = await this.prisma.formatDeliverable.update({
-      where: { id: deliverableId },
-      data: {
+    // Without this check any deliverable could be "proof rejected" — even
+    // a draft nobody has reviewed, or proof that was already approved and
+    // paid, pulling it back out of the payout.
+    if (!PROOF_REVIEWABLE.includes(deliverable.status)) {
+      throw new BadRequestException({
+        code: "VALIDATION_ERROR",
+        message: "Proof can only be rejected when it is under review",
+      });
+    }
+    const trimmedReason = reason?.trim() ?? "";
+    if (!trimmedReason) {
+      throw new BadRequestException({
+        code: "VALIDATION_ERROR",
+        message: "Add a reason so the creator knows what to fix",
+      });
+    }
+
+    const updated = await transitionDeliverable(
+      this.prisma,
+      deliverableId,
+      PROOF_REVIEWABLE,
+      {
         status: FormatDeliverableStatus.proof_rejected,
-        rejectionReason: reason,
+        rejectionReason: trimmedReason,
         proofReviewedAt: new Date(),
         reviewedByUserId: userId,
       },
-    });
+      "Proof can only be rejected when it is under review",
+    );
 
     this.realtime.emitDeliverableLiveProof(
       this.deliverableEventPayload(updated, deliverable.participation),
@@ -1367,7 +1434,7 @@ export class ParticipationService {
       targetType: "FormatDeliverable",
       targetId: updated.id,
       brandProfileId: deliverable.participation.campaign.brandProfileId ?? undefined,
-      metadata: { campaignTitle: deliverable.participation.campaign.title, platform: updated.platform, reason },
+      metadata: { campaignTitle: deliverable.participation.campaign.title, platform: updated.platform, reason: trimmedReason },
     });
     await this.notifications.create(deliverable.participation.creatorId, "creator", {
       type: "proof_rejected",

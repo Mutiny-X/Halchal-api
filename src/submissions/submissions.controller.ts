@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   Body,
   Controller,
   Get,
@@ -129,8 +130,11 @@ export class SubmissionsController {
     @CurrentUser() user: AuthJwtPayload,
     @Param("id") id: string,
     @Req() req: import("express").Request,
-    @UploadedFile() file: Express.Multer.File,
+    @UploadedFile() file: Express.Multer.File | undefined,
   ) {
+    if (!file) {
+      throw new BadRequestException({ code: "VALIDATION_ERROR", message: "Choose a file to upload" });
+    }
     const result = await this.storage.saveUploadedFile("admin-draft-copies", {
       buffer: file.buffer,
       originalname: file.originalname,

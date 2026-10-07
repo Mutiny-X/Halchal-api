@@ -1051,7 +1051,10 @@ export class AdminService {
     return Array.from(byProfile.values());
   }
 
-  async payoutCampaign(campaignId: string, creatorId?: string) {
+  /** `creatorProfileId` narrows a per-creator payout to one payout row —
+   * the same person's two profiles in a campaign are listed (and confirmed)
+   * as separate rows, so paying one must not pay the other. */
+  async payoutCampaign(campaignId: string, creatorId?: string, creatorProfileId?: string) {
     const deliverables = await this.prisma.formatDeliverable.findMany({
       where: {
         status: FormatDeliverableStatus.proof_approved,
@@ -1059,6 +1062,7 @@ export class AdminService {
         participation: {
           campaignId,
           ...(creatorId ? { creatorId } : {}),
+          ...(creatorProfileId ? { creatorProfileId } : {}),
         },
       },
       include: {
@@ -1083,6 +1087,10 @@ export class AdminService {
     for (const d of deliverables) {
       const { title, ratePer1kPaise, maxPayoutPaise, brandProfileId } = d.participation.campaign;
       const amountPaise = computeEstimatedPaise(d.viewCount, ratePer1kPaise, maxPayoutPaise);
+      // Nothing earned yet (views not synced, or genuinely zero): marking it
+      // paid would lock it at ₹0 for good and tell the creator "You got
+      // paid". Leave it unpaid so it can be paid once views come in.
+      if (amountPaise <= 0) continue;
       const repost = d.marketplaceRepostClaim;
 
       let paidNow: boolean;

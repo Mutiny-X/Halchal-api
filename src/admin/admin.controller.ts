@@ -533,8 +533,9 @@ export class AdminController {
   payoutOneCreator(
     @Param("id") campaignId: string,
     @Param("creatorId") creatorId: string,
+    @Query("creatorProfileId") creatorProfileId?: string,
   ) {
-    return this.admin.payoutCampaign(campaignId, creatorId);
+    return this.admin.payoutCampaign(campaignId, creatorId, creatorProfileId || undefined);
   }
 
   @Post("marketplace/listings/:id/delist")

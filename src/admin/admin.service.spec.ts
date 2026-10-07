@@ -296,4 +296,40 @@ describe("AdminService.payoutCampaign", () => {
     expect(tx.marketplaceRepost.update).not.toHaveBeenCalled();
     expect(result).toEqual({ paidCount: 0, totalPaidPaise: 0 });
   });
+  it("leaves a deliverable with nothing earned unpaid instead of locking it at ₹0", async () => {
+    const { service, prisma, wallet, notifications } = makePayoutService();
+    prisma.formatDeliverable.findMany.mockResolvedValue([
+      {
+        id: "deliverable-0",
+        participationId: "participation-1",
+        platform: "instagram_reel",
+        viewCount: 0,
+        status: "proof_approved",
+        marketplaceRepostClaim: null,
+        participation: { creatorId: "creator-b", campaignId: "campaign-1", campaign: campaignSelect },
+      },
+    ]);
+
+    const result = await service.payoutCampaign("campaign-1");
+
+    expect(prisma.formatDeliverable.updateMany).not.toHaveBeenCalled();
+    expect(wallet.creditEarning).not.toHaveBeenCalled();
+    expect(notifications.create).not.toHaveBeenCalled();
+    expect(result).toEqual({ paidCount: 0, totalPaidPaise: 0 });
+  });
+
+  it("pays only the chosen profile's row when a creator has two profiles in the campaign", async () => {
+    const { service, prisma } = makePayoutService();
+    prisma.formatDeliverable.findMany.mockResolvedValue([]);
+
+    await service.payoutCampaign("campaign-1", "creator-b", "profile-2");
+
+    expect(prisma.formatDeliverable.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          participation: { campaignId: "campaign-1", creatorId: "creator-b", creatorProfileId: "profile-2" },
+        }),
+      }),
+    );
+  });
 });
