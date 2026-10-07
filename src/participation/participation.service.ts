@@ -30,6 +30,7 @@ import { InAppNotificationService } from "../notifications/in-app-notification.s
 import { PrismaService } from "../prisma/prisma.service";
 import { RealtimeService } from "../realtime/realtime.service";
 import { FILLABLE_DELIVERABLE_STATUSES } from "./deliverable-status";
+import { attributionFrom, buildTrails, TRAIL_ACTIONS, TRAIL_TARGET_TYPE, type TrailEntry } from "./review-trail";
 import {
   DRAFT_REVIEWABLE,
   liveLinkProblem,
@@ -664,6 +665,27 @@ export class ParticipationService {
     return this.formatParticipation(participation);
   }
 
+  /** Each clip's review history — who approved or rejected it. */
+  private async loadReviewTrails(deliverableIds: string[]): Promise<Map<string, TrailEntry[]>> {
+    if (deliverableIds.length === 0) return new Map();
+    const rows = await this.prisma.activityLog.findMany({
+      where: {
+        targetType: TRAIL_TARGET_TYPE,
+        targetId: { in: deliverableIds },
+        action: { in: TRAIL_ACTIONS },
+      },
+      select: {
+        action: true,
+        targetId: true,
+        metadata: true,
+        createdAt: true,
+        actor: { select: { displayName: true, email: true, role: true } },
+      },
+      orderBy: { createdAt: "asc" },
+    });
+    return buildTrails(rows);
+  }
+
   private async resolveBrandProfileIds(
     userId: string,
     role: UserRole,
@@ -745,6 +767,8 @@ export class ParticipationService {
       take: filters?.campaignId ? 2000 : 100,
     });
 
+    const trails = await this.loadReviewTrails(deliverables.map((d) => d.id));
+
     return deliverables.map((d) => {
       const ratePer1kPaise = d.participation.campaign.ratePer1kPaise;
       const estimatedPaise = ratePer1kPaise > 0
@@ -765,6 +789,8 @@ export class ParticipationService {
       proofReviewedAt: d.proofReviewedAt?.toISOString() ?? null,
       rejectionReason: d.rejectionReason,
       paidAt: d.paidAt?.toISOString() ?? null,
+      // Who made the latest decision on the work / on the proof.
+      ...attributionFrom(trails.get(d.id)),
       campaignId: d.participation.campaign.id,
       campaignTitle: d.participation.campaign.title,
       participationId: d.participationId,
@@ -839,10 +865,16 @@ export class ParticipationService {
       deliverable.participation.campaign,
     );
 
+    const reviewTrail = (await this.loadReviewTrails([deliverable.id])).get(deliverable.id) ?? [];
+
     return {
       id: deliverable.id,
       platform: deliverable.platform,
       status: deliverable.status,
+      // Every approve / reject on this clip, oldest first, with who did it.
+      reviewTrail,
+      ...attributionFrom(reviewTrail),
+      paidAt: deliverable.paidAt?.toISOString() ?? null,
       draftDriveUrl: deliverable.draftDriveUrl,
       adminUploadedDraftUrl: deliverable.adminUploadedDraftUrl,
       livePostUrl: deliverable.livePostUrl,
