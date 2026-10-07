@@ -16,15 +16,14 @@ describe("review trail", () => {
       row("submission.approved", "d2", "2026-10-02T10:00:00Z", null),
     ]);
 
-    expect(trails.get("d1")).toHaveLength(4);
+    expect(trails.get("d1")).toHaveLength(3);
     expect(trails.get("d1")![0]).toMatchObject({ step: "work_rejected", byName: "Asha", byRole: "team", reason: "Hook too late" });
 
     const who = attributionFrom(trails.get("d1"));
     expect(who.workReviewedBy).toMatchObject({ step: "work_approved", byName: "ravi@x.com", byRole: "team" });
     expect(who.proofReviewedBy).toMatchObject({ step: "proof_approved", byName: "Boss", byRole: "admin" });
-    expect(who.paidBy).toMatchObject({ step: "paid", byName: "Boss" });
 
     expect(attributionFrom(trails.get("d2")).workReviewedBy?.byName).toBe("Someone on the team");
-    expect(attributionFrom(undefined)).toEqual({ workReviewedBy: null, proofReviewedBy: null, paidBy: null });
+    expect(attributionFrom(undefined)).toEqual({ workReviewedBy: null, proofReviewedBy: null });
   });
 });

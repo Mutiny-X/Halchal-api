@@ -528,19 +528,18 @@ export class AdminController {
 
   @Post("campaigns/:id/payouts/all")
   @AdminSectionRoute("campaigns")
-  payoutAllCreators(@CurrentUser() user: AuthJwtPayload, @Param("id") campaignId: string) {
-    return this.admin.payoutCampaign(campaignId, undefined, undefined, user.sub);
+  payoutAllCreators(@Param("id") campaignId: string) {
+    return this.admin.payoutCampaign(campaignId);
   }
 
   @Post("campaigns/:id/payouts/creator/:creatorId")
   @AdminSectionRoute("campaigns")
   payoutOneCreator(
-    @CurrentUser() user: AuthJwtPayload,
     @Param("id") campaignId: string,
     @Param("creatorId") creatorId: string,
     @Query("creatorProfileId") creatorProfileId?: string,
   ) {
-    return this.admin.payoutCampaign(campaignId, creatorId, creatorProfileId || undefined, user.sub);
+    return this.admin.payoutCampaign(campaignId, creatorId, creatorProfileId || undefined);
   }
 
   @Post("marketplace/listings/:id/delist")

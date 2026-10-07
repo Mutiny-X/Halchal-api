@@ -1,9 +1,9 @@
 import type { Prisma, UserRole } from "@prisma/client";
 
-/** Who did what to a clip, read back from the activity log — every approve,
- * reject and payout is logged there with the admin or team member who did
- * it. */
-export type TrailStep = "work_approved" | "work_rejected" | "proof_approved" | "proof_rejected" | "paid";
+/** Who did what to a clip, read back from the activity log — every approve
+ * and reject is logged there with the admin or team member who did it.
+ * (Payouts aren't included: only the admin pays.) */
+export type TrailStep = "work_approved" | "work_rejected" | "proof_approved" | "proof_rejected";
 
 export type TrailEntry = {
   step: TrailStep;
@@ -18,7 +18,6 @@ export type ReviewAttribution = {
   /** Latest decision on the work, and on the proof of work. */
   workReviewedBy: TrailEntry | null;
   proofReviewedBy: TrailEntry | null;
-  paidBy: TrailEntry | null;
 };
 
 const ACTION_STEP: Record<string, TrailStep> = {
@@ -26,7 +25,6 @@ const ACTION_STEP: Record<string, TrailStep> = {
   "submission.rejected": "work_rejected",
   "proof.approved": "proof_approved",
   "proof.rejected": "proof_rejected",
-  "payout.paid": "paid",
 };
 
 export const TRAIL_ACTIONS = Object.keys(ACTION_STEP);
@@ -74,6 +72,5 @@ export function attributionFrom(trail: TrailEntry[] | undefined): ReviewAttribut
   return {
     workReviewedBy: last(["work_approved", "work_rejected"]),
     proofReviewedBy: last(["proof_approved", "proof_rejected"]),
-    paidBy: last(["paid"]),
   };
 }

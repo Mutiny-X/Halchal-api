@@ -665,7 +665,7 @@ export class ParticipationService {
     return this.formatParticipation(participation);
   }
 
-  /** Each clip's review history — who approved, rejected or paid it. */
+  /** Each clip's review history — who approved or rejected it. */
   private async loadReviewTrails(deliverableIds: string[]): Promise<Map<string, TrailEntry[]>> {
     if (deliverableIds.length === 0) return new Map();
     const rows = await this.prisma.activityLog.findMany({
@@ -789,7 +789,7 @@ export class ParticipationService {
       proofReviewedAt: d.proofReviewedAt?.toISOString() ?? null,
       rejectionReason: d.rejectionReason,
       paidAt: d.paidAt?.toISOString() ?? null,
-      // Who made the latest decision on the work / the proof, and who paid.
+      // Who made the latest decision on the work / on the proof.
       ...attributionFrom(trails.get(d.id)),
       campaignId: d.participation.campaign.id,
       campaignTitle: d.participation.campaign.title,
@@ -871,7 +871,7 @@ export class ParticipationService {
       id: deliverable.id,
       platform: deliverable.platform,
       status: deliverable.status,
-      // Every approve / reject / payout on this clip, oldest first, with who did it.
+      // Every approve / reject on this clip, oldest first, with who did it.
       reviewTrail,
       ...attributionFrom(reviewTrail),
       paidAt: deliverable.paidAt?.toISOString() ?? null,
