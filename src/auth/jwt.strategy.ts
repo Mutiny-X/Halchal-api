@@ -4,7 +4,7 @@ import { PassportStrategy } from "@nestjs/passport";
 import { ExtractJwt, Strategy } from "passport-jwt";
 
 import type { Env } from "../config/env";
-import type { AuthJwtPayload } from "./auth.types";
+import { BRAND_ACCESS_CLOSED, type AuthJwtPayload } from "./auth.types";
 
 @Injectable()
 export class JwtStrategy extends PassportStrategy(Strategy) {
@@ -22,6 +22,10 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
         code: "UNAUTHORIZED",
         message: "Invalid token",
       });
+    }
+    // Ends any brand session issued before brand sign-in was closed.
+    if (payload.role === "brand") {
+      throw new UnauthorizedException(BRAND_ACCESS_CLOSED);
     }
     return payload;
   }

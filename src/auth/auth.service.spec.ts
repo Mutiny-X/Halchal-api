@@ -24,14 +24,12 @@ function makeAuthService() {
     }),
   };
   const email = {};
-  const notifications = { notifyAllAdmins: vi.fn().mockResolvedValue(undefined) };
   const service = new AuthService(
     prisma as never,
     jwt as never,
     config as never,
     otp as never,
     email as never,
-    notifications as never,
   );
   return { service, prisma, otp, jwt };
 }

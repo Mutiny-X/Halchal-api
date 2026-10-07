@@ -55,20 +55,17 @@ export class RealtimeGateway
         secret: this.config.get("JWT_SECRET", { infer: true }),
       });
 
+      // Brands don't sign in any more — no live updates for an old session.
+      if (payload.role === UserRole.brand) {
+        client.disconnect();
+        return;
+      }
+
       client.data.userId = payload.sub;
       client.data.role = payload.role;
 
       if (payload.role === UserRole.admin) {
         await client.join("admin");
-      }
-
-      if (payload.role === UserRole.brand) {
-        const brandProfileId =
-          await this.campaignAccess.getBrandProfileIdForUser(payload.sub);
-        if (brandProfileId) {
-          client.data.brandProfileId = brandProfileId;
-          await client.join(`brand:${brandProfileId}`);
-        }
       }
 
       if (payload.role === UserRole.creator) {
