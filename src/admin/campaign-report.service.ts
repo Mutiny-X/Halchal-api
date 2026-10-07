@@ -1,4 +1,4 @@
-import { Injectable, Logger, NotFoundException } from "@nestjs/common";
+import { Injectable, Logger, NotFoundException, ServiceUnavailableException } from "@nestjs/common";
 import { Prisma } from "@prisma/client";
 import { randomBytes } from "node:crypto";
 import puppeteer from "puppeteer";
@@ -330,27 +330,51 @@ export class CampaignReportService {
     return fresh;
   }
 
-  private async renderPdf(html: string): Promise<Buffer> {
+  /** Renders wait their turn: each one starts a headless browser (a few
+   * hundred MB), so several at once could run the API out of memory. */
+  private renderQueue: Promise<unknown> = Promise.resolve();
+
+  private renderPdf(html: string): Promise<Buffer> {
+    const run = this.renderQueue.then(() => this.renderPdfNow(html));
+    this.renderQueue = run.catch(() => undefined);
+    return run;
+  }
+
+  private async renderPdfNow(html: string): Promise<Buffer> {
     // --no-sandbox: Railway/containerized deploys don't have the user
     // namespaces Chromium's sandbox needs; the process itself is already
     // sandboxed at the container level.
-    const browser = await puppeteer.launch({
-      headless: true,
-      args: ["--no-sandbox", "--disable-setuid-sandbox"],
-    });
+    let browser: Awaited<ReturnType<typeof puppeteer.launch>>;
+    try {
+      browser = await puppeteer.launch({
+        headless: true,
+        args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
+        timeout: 30_000,
+      });
+    } catch (err) {
+      // The browser couldn't start (not installed on this server, or missing
+      // system libraries). Say so plainly instead of a bare 500 — the CSV
+      // ledger doesn't need a browser and still works.
+      this.logger.error(`Campaign report: headless browser failed to start: ${err}`);
+      throw new ServiceUnavailableException({
+        code: "REPORT_UNAVAILABLE",
+        message: "The PDF report can't be generated on this server yet. The ledger (CSV) download still works.",
+      });
+    }
     try {
       const page = await browser.newPage();
       // No external resources (logo is inline SVG, system fonts only), so
       // there's nothing async to wait on beyond the page's own load.
-      await page.setContent(html, { waitUntil: "load" });
+      await page.setContent(html, { waitUntil: "load", timeout: 30_000 });
       const pdf = await page.pdf({
         format: "A4",
         printBackground: true,
         margin: { top: "0", bottom: "0", left: "0", right: "0" },
+        timeout: 60_000,
       });
       return Buffer.from(pdf);
     } finally {
-      await browser.close();
+      await browser.close().catch(() => undefined);
     }
   }
 }

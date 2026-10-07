@@ -42,7 +42,6 @@ import { DRAFT_URL_MESSAGE, isUploadedFileUrl, isValidDraftUrl } from "./drive-u
 import { ReviewDeliverableAction } from "./dto/review-deliverable.dto";
 import type { SubmitDraftDto } from "./dto/submit-draft.dto";
 import type { SubmitLiveProofDto } from "./dto/submit-live-proof.dto";
-import { isUnpublished } from "../campaigns/campaign-status";
 import {
   computeParticipationSummary,
   isParticipationCompleted,
@@ -682,68 +681,6 @@ export class ParticipationService {
     const brandProfileId =
       await this.campaignAccess.getBrandProfileIdForUser(userId);
     return brandProfileId ? [brandProfileId] : [];
-  }
-
-  /** Public, unauthenticated read-only deliverables list for a campaign's share link. No phone numbers, no rate/budget fields. */
-  async getPublicDeliverables(campaignId: string) {
-    const campaign = await this.prisma.campaign.findUnique({
-      where: { id: campaignId },
-    });
-    if (!campaign || isUnpublished(campaign.status)) {
-      throw new NotFoundException({
-        code: "NOT_FOUND",
-        message: "Campaign not available",
-      });
-    }
-
-    const deliverables = await this.prisma.formatDeliverable.findMany({
-      where: { participation: { campaignId } },
-      include: {
-        _count: { select: { rejectionEvents: true } },
-        participation: {
-          include: {
-            creator: { select: { id: true, displayName: true, username: true } },
-            deliverables: {
-              select: { id: true, platform: true, status: true },
-              orderBy: { platform: "asc" },
-            },
-          },
-        },
-      },
-      orderBy: { draftSubmittedAt: "desc" },
-    });
-
-    return deliverables.map((d) => {
-      const estimatedPaise = campaign.ratePer1kPaise > 0
-        ? Math.min(Math.floor((d.viewCount / 1000) * campaign.ratePer1kPaise), campaign.maxPayoutPaise)
-        : 0;
-      return {
-        id: d.id,
-        platform: d.platform,
-        status: d.status,
-        draftDriveUrl: d.draftDriveUrl,
-        livePostUrl: d.livePostUrl,
-        rejectionReason: d.rejectionReason,
-        draftSubmittedAt: d.draftSubmittedAt?.toISOString() ?? null,
-        participationId: d.participationId,
-        joinedAt: d.participation.joinedAt.toISOString(),
-        creatorName:
-          d.participation.creator.displayName ??
-          d.participation.creator.username ??
-          "Creator",
-        priorRejectionCount: d._count.rejectionEvents,
-        viewCount: d.viewCount,
-        likeCount: d.likeCount,
-        commentCount: d.commentCount,
-        shareCount: d.shareCount,
-        estimatedPaise,
-        siblingDeliverables: d.participation.deliverables.map((s) => ({
-          id: s.id,
-          platform: s.platform,
-          status: s.status,
-        })),
-      };
-    });
   }
 
   async listDeliverablesForBrand(
