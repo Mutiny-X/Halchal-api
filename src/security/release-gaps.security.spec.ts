@@ -38,7 +38,8 @@ describe("Sign-in rate limits (new in this release)", () => {
       expect(v).toBeLessThanOrEqual(max);
     });
   }
-  it("refresh has its own tighter limit than the global 100/min [new: refresh throttle]", () => {
-    expect(limit("refresh")).toBeDefined();
+  it("refresh and logout are rate-limited (refresh at the general limit: shared mobile addresses) [T23]", () => {
+    expect(limit("refresh")).toBeLessThanOrEqual(100);
+    expect(limit("logout")).toBeLessThanOrEqual(30);
   });
 });

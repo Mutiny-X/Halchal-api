@@ -131,8 +131,12 @@ export class AuthController {
     });
   }
 
+  // Kept at the general limit on purpose. A refresh token is 48 random
+  // bytes, so guessing isn't the risk — and many creators on one mobile
+  // network share a single address, so a tight per-address limit here would
+  // block real people rather than attackers.
   @Post("refresh")
-  @Throttle({ default: { limit: 30, ttl: 60_000 } })
+  @Throttle({ default: { limit: 100, ttl: 60_000 } })
   @ApiOkResponse({ type: AuthResponseDto })
   refresh(@Body() dto: RefreshTokenDto) {
     return this.auth.refresh(dto.refreshToken);
