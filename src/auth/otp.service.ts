@@ -9,6 +9,7 @@ import { ConfigService } from "@nestjs/config";
 import * as bcrypt from "bcryptjs";
 import { createHash, randomInt } from "node:crypto";
 
+import { maskPhone } from "../common/mask";
 import type { Env } from "../config/env";
 import { PrismaService } from "../prisma/prisma.service";
 import { WhatsappService } from "../notifications/whatsapp.service";
@@ -93,7 +94,7 @@ export class OtpService {
 
     if (fixedCode) {
       this.logger.log(
-        `Fixed OTP profile ${phone} — enter ${fixedCode} (no WhatsApp)`,
+        `Fixed OTP profile ${maskPhone(phone)} — static code in use (no WhatsApp)`,
       );
       return { expiresInSeconds: ttl };
     }
@@ -101,7 +102,7 @@ export class OtpService {
     try {
       await this.whatsapp.sendOtp(phone, code);
     } catch {
-      this.logger.error(`Failed to deliver OTP to ${phone}`);
+      this.logger.error(`Failed to deliver OTP to ${maskPhone(phone)}`);
       throw new BadRequestException({
         code: "INTERNAL_ERROR",
         message: "Could not send OTP. Try again later.",
@@ -115,7 +116,7 @@ export class OtpService {
     const phone = normalizePhone(rawPhone);
     const fixedCode = await this.fixedOtp.getFixedCodeForPhone(phone);
     if (fixedCode && code === fixedCode) {
-      this.logger.warn(`Fixed-code OTP verification used for ${phone}`);
+      this.logger.warn(`Fixed-code OTP verification used for ${maskPhone(phone)}`);
       await this.prisma.otpSession.deleteMany({ where: { phone } });
       return;
     }

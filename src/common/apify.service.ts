@@ -1,4 +1,4 @@
-import { Injectable, Logger } from "@nestjs/common";
+import { BadRequestException, Injectable, Logger } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 
 export type PlatformViewResult = {
@@ -30,6 +30,18 @@ export type SocialProfileStats = {
   profilePicUrl: string | null;
   bio: string | null;
   fetchedAt: string;
+};
+
+/** The domains a profile link may be on, per platform. */
+const PROFILE_HOSTS: Record<"instagram" | "youtube" | "twitter", string[]> = {
+  instagram: ["instagram.com"],
+  youtube: ["youtube.com", "youtu.be"],
+  twitter: ["twitter.com", "x.com"],
+};
+const PROFILE_NAMES: Record<"instagram" | "youtube" | "twitter", string> = {
+  instagram: "Instagram",
+  youtube: "YouTube",
+  twitter: "X",
 };
 
 @Injectable()
@@ -292,19 +304,43 @@ export class ApifyService {
     };
   }
 
-  /** Normalise a handle/username input to a full profile URL for the platform. */
+  /**
+   * Turns what a creator typed — a username or a profile link — into a
+   * full https profile link on that platform. A link is only accepted on
+   * the platform's own domain (matched as a host, not as text that merely
+   * appears somewhere in the address), and a username only if it looks
+   * like one; anything else is refused rather than stored and later shown
+   * to admins as a clickable link.
+   */
   normalizeProfileUrl(platform: "instagram" | "youtube" | "twitter", input: string): string {
     const s = input.trim().replace(/^@/, "");
-    if (platform === "instagram") {
-      if (/instagram\.com/i.test(s)) return s.split("?")[0];
-      return `https://www.instagram.com/${s}/`;
+    const hosts = PROFILE_HOSTS[platform];
+    const refuse = () =>
+      new BadRequestException({
+        code: "VALIDATION_ERROR",
+        message: `Enter your ${PROFILE_NAMES[platform]} username or a link to your ${PROFILE_NAMES[platform]} profile.`,
+      });
+
+    const hasScheme = /^[a-z][a-z0-9+.-]*:/i.test(s);
+    if (hasScheme || s.includes("/")) {
+      let url: URL;
+      try {
+        url = new URL(hasScheme ? s : `https://${s}`);
+      } catch {
+        throw refuse();
+      }
+      const host = url.hostname.toLowerCase();
+      const onPlatform = hosts.some((h) => host === h || host.endsWith(`.${h}`));
+      if ((url.protocol !== "https:" && url.protocol !== "http:") || url.username || url.password || !onPlatform) {
+        throw refuse();
+      }
+      const query = platform === "instagram" ? "" : url.search;
+      return `https://${url.host}${url.pathname}${query}`;
     }
-    if (platform === "youtube") {
-      if (/youtube\.com|youtu\.be/i.test(s)) return s;
-      return `https://www.youtube.com/@${s}`;
-    }
-    // twitter
-    if (/twitter\.com|x\.com/i.test(s)) return s;
+
+    if (!/^[A-Za-z0-9._-]{1,100}$/.test(s)) throw refuse();
+    if (platform === "instagram") return `https://www.instagram.com/${s}/`;
+    if (platform === "youtube") return `https://www.youtube.com/@${s}`;
     return `https://x.com/${s}`;
   }
 

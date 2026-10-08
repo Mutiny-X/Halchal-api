@@ -239,21 +239,15 @@ export class UsersController {
   )
   async submitAadhaar(
     @CurrentUser() user: AuthJwtPayload,
-    @Req() req: import("express").Request,
     @UploadedFile() file: Express.Multer.File,
   ) {
     if (!file?.buffer) {
       throw new BadRequestException({ code: "VALIDATION_ERROR", message: "File is required" });
     }
-    const result = await this.storage.saveUploadedFile("aadhaar-documents", {
-      buffer: file.buffer,
-      originalname: file.originalname,
-      mimetype: file.mimetype,
-    });
-    const url = result.url.startsWith("http")
-      ? result.url
-      : `${req.protocol}://${req.get("host")}${result.url}`;
-    return this.users.submitAadhaar(user.sub, url, file.buffer, file.mimetype);
+    // The Aadhaar image is checked straight from the upload and never
+    // stored: only the verified name and the masked last four digits are
+    // kept (see User.aadhaarMaskedNumber).
+    return this.users.submitAadhaar(user.sub, null, file.buffer, file.mimetype);
   }
 
   @Post("me/device-token")
@@ -266,8 +260,11 @@ export class UsersController {
   }
 
   @Delete("me/device-token")
-  async unregisterDeviceToken(@Body() body: UnregisterDeviceTokenDto) {
-    await this.push.unregisterToken(body.token);
+  async unregisterDeviceToken(
+    @CurrentUser() user: AuthJwtPayload,
+    @Body() body: UnregisterDeviceTokenDto,
+  ) {
+    await this.push.unregisterToken(user.sub, body.token);
     return { unregistered: true };
   }
 }

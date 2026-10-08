@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   Injectable,
+  Logger,
   NotFoundException,
   ServiceUnavailableException,
 } from "@nestjs/common";
@@ -10,6 +11,7 @@ import * as bcrypt from "bcryptjs";
 
 import { ApifyService } from "../common/apify.service";
 import { PrismaService } from "../prisma/prisma.service";
+import { ObjectStorageService } from "../storage/object-storage.service";
 import { CashfreeVerificationService } from "../verification/cashfree-verification.service";
 
 const BADGE_THRESHOLDS_PAISE = [
@@ -48,10 +50,13 @@ export function computeStreakDays(liveSubmittedAts: Date[]): number {
 
 @Injectable()
 export class UsersService {
+  private readonly logger = new Logger(UsersService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly apify: ApifyService,
     private readonly cashfree: CashfreeVerificationService,
+    private readonly storage: ObjectStorageService,
   ) {}
 
   async getMe(userId: string, role: UserRole) {
@@ -205,6 +210,10 @@ export class UsersService {
     platform: "instagram" | "youtube" | "twitter",
     handleOrUrl: string,
   ) {
+    // Refuses anything that isn't a username or a link on the platform's
+    // own domain, before it is stored and shown to admins as a link.
+    this.apify.normalizeProfileUrl(platform, handleOrUrl);
+
     const existing = await this.prisma.user.findUnique({
       where: { id: userId },
       select: { socialStats: true, socialLinks: true },
@@ -368,7 +377,7 @@ export class UsersService {
    * card"), and the whole point of building this over the cheaper
    * plausibility-check alternative was getting real, UIDAI-backed
    * assurance, not settling for OCR alone. */
-  async submitAadhaar(userId: string, documentUrl: string, imageBuffer: Buffer, mimeType: string) {
+  async submitAadhaar(userId: string, documentUrl: string | null, imageBuffer: Buffer, mimeType: string) {
     const user = await this.prisma.user.findUnique({ where: { id: userId } });
     if (!user) {
       throw new NotFoundException({ code: "NOT_FOUND", message: "User not found" });
@@ -438,6 +447,11 @@ export class UsersService {
   }
 
   async deleteMe(userId: string) {
+    const before = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { avatarUrl: true, kycDocumentUrl: true, panDocumentUrl: true, aadhaarDocumentUrl: true },
+    });
+
     await this.prisma.$transaction([
       this.prisma.refreshToken.updateMany({
         where: { userId, revokedAt: null },
@@ -455,6 +469,8 @@ export class UsersService {
       // to begin with — it belonged to this now-deleted account).
       this.prisma.instagramConnection.deleteMany({ where: { userId } }),
       this.prisma.youtubeConnection.deleteMany({ where: { userId } }),
+      // Unfinished Instagram sign-ins hold an encrypted access token too.
+      this.prisma.instagramOAuthTransaction.deleteMany({ where: { userId } }),
       this.prisma.user.update({
         where: { id: userId },
         data: {
@@ -468,9 +484,30 @@ export class UsersService {
           socialLinks: Prisma.JsonNull,
           socialStats: Prisma.JsonNull,
           kycDocumentUrl: null,
+          // Identity documents and anything that could sign in. The PAN
+          // number and its verified name stay: they are the tax record for
+          // payouts already made.
+          panDocumentUrl: null,
+          aadhaarDocumentUrl: null,
+          aadhaarVerifiedName: null,
+          aadhaarMaskedNumber: null,
+          aadhaarVerifiedAt: null,
+          aadhaarFailureReason: null,
+          passwordHash: null,
+          fixedOtpCode: null,
         },
       }),
     ]);
+
+    // The files themselves, not just the links to them. Best-effort and
+    // after the account is gone: a storage hiccup must not undo a deletion.
+    const files = [before?.avatarUrl, before?.kycDocumentUrl, before?.panDocumentUrl, before?.aadhaarDocumentUrl];
+    for (const url of files) {
+      if (!url) continue;
+      await this.storage.deleteIdentityFile(url).catch((error: unknown) => {
+        this.logger.warn(`Account ${userId} deleted, but a stored file could not be removed: ${String(error)}`);
+      });
+    }
     return { deleted: true };
   }
 }

@@ -6,6 +6,7 @@ import { PassportModule } from "@nestjs/passport";
 import type { Env } from "../config/env";
 import { NotificationsModule } from "../notifications/notifications.module";
 import { RealtimeModule } from "../realtime/realtime.module";
+import { AuthCleanupService } from "./auth-cleanup.service";
 import { CampaignInviteService } from "./campaign-invite.service";
 import { AuthController } from "./auth.controller";
 import { AuthService } from "./auth.service";
@@ -34,6 +35,7 @@ import { OtpService } from "./otp.service";
     OtpService,
     FixedOtpService,
     JwtStrategy,
+    AuthCleanupService,
   ],
   exports: [AuthService, CampaignInviteService, JwtModule],
 })

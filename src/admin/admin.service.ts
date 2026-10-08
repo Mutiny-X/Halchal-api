@@ -1,6 +1,7 @@
 import { BadRequestException, ConflictException, Injectable, NotFoundException } from "@nestjs/common";
 import { AdminPermissionLevel, AdminSection, CampaignInviteStatus, FormatDeliverableStatus, KycStatus, NewClipperIntakeStatus, StaffAccessLevel, SupportTicketStatus, UserRole } from "@prisma/client";
 import * as bcrypt from "bcryptjs";
+import { randomBytes } from "node:crypto";
 
 import { ActivityLogService } from "../activity/activity-log.service";
 import { getCampaignPoolUsage } from "../common/campaign-pool";
@@ -114,7 +115,10 @@ export class AdminService {
     if (existing) {
       throw new ConflictException({ code: "CONFLICT", message: "Email already registered" });
     }
-    const rawPassword = `Halchal@${Math.random().toString(36).slice(2, 10)}`;
+    // Never used to sign in (brand sign-in is closed), but still a
+    // credential on a real account, so it comes from the system's secure
+    // random source, not Math.random().
+    const rawPassword = `Halchal@${randomBytes(18).toString("base64url")}`;
     const passwordHash = await bcrypt.hash(rawPassword, 12);
     const user = await this.prisma.user.create({
       data: {
@@ -526,6 +530,7 @@ export class AdminService {
       this.prisma.refreshToken.updateMany({ where: { userId: staffUserId, revokedAt: null }, data: { revokedAt: new Date() } }),
       this.prisma.passwordResetToken.updateMany({ where: { userId: staffUserId, usedAt: null }, data: { usedAt: new Date() } }),
     ]);
+    await this.realtime.disconnectUser(staffUserId);
     await this.activityLog.log(staffUserId, "staff.deactivated", {
       targetType: "User",
       targetId: staffUserId,
@@ -571,6 +576,7 @@ export class AdminService {
       this.prisma.refreshToken.updateMany({ where: { userId: staffUserId, revokedAt: null }, data: { revokedAt: new Date() } }),
       this.prisma.passwordResetToken.updateMany({ where: { userId: staffUserId, usedAt: null }, data: { usedAt: new Date() } }),
     ]);
+    await this.realtime.disconnectUser(staffUserId);
     await this.activityLog.log(staffUserId, "staff.removed", { targetType: "User", targetId: staffUserId });
     return { deleted: true };
   }

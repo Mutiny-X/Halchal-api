@@ -65,8 +65,8 @@ export function liveLinkProblem(platform: string, url: string): string | null {
   let host: string;
   try {
     const parsed = new URL(url.trim());
-    if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
-      return `Submit the link to your live ${family.name} post.`;
+    if (parsed.protocol !== "https:") {
+      return `Submit the https:// link to your live ${family.name} post.`;
     }
     host = parsed.hostname.toLowerCase();
   } catch {
@@ -79,6 +79,10 @@ export function liveLinkProblem(platform: string, url: string): string | null {
 /** The same post written with or without a trailing slash. */
 export function liveLinkVariants(url: string): string[] {
   const trimmed = url.trim();
-  const bare = trimmed.replace(/\/+$/, "");
+  // Trailing slashes are stripped by index, not with a regex: /\/+$/ slows
+  // down badly on a long run of slashes that isn't at the very end.
+  let end = trimmed.length;
+  while (end > 0 && trimmed[end - 1] === "/") end -= 1;
+  const bare = trimmed.slice(0, end);
   return Array.from(new Set([trimmed, bare, `${bare}/`]));
 }

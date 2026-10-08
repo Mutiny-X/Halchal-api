@@ -2,6 +2,7 @@ import { ApiPropertyOptional } from "@nestjs/swagger";
 import { IsObject, IsOptional, IsString, MaxLength } from "class-validator";
 
 import { IsAcceptablePassword, PASSWORD_MIN_LENGTH } from "../../auth/password-policy";
+import { IsOwnAvatarUrl, IsSocialLinks } from "./profile-validators";
 
 export class UpdateProfileDto {
   @ApiPropertyOptional()
@@ -24,6 +25,7 @@ export class UpdateProfileDto {
   @IsOptional()
   @IsString()
   @MaxLength(500)
+  @IsOwnAvatarUrl()
   avatarUrl?: string;
 
   @ApiPropertyOptional({
@@ -31,6 +33,7 @@ export class UpdateProfileDto {
   })
   @IsOptional()
   @IsObject()
+  @IsSocialLinks()
   socialLinks?: Record<string, string>;
 }
 

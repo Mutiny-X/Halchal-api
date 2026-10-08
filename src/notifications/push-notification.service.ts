@@ -114,8 +114,10 @@ export class PushNotificationService implements OnModuleDestroy {
     });
   }
 
-  async unregisterToken(token: string): Promise<void> {
-    await this.prisma.deviceToken.deleteMany({ where: { token } });
+  /** Removes a device token — only if it is registered to this user, so
+   * knowing someone else's token can't be used to silence their phone. */
+  async unregisterToken(userId: string, token: string): Promise<void> {
+    await this.prisma.deviceToken.deleteMany({ where: { token, userId } });
   }
 
   /** Lazily initializes the Firebase Admin app from

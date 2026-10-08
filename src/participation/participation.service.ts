@@ -39,6 +39,7 @@ import {
   PROOF_REVIEWABLE,
   transitionDeliverable,
 } from "./deliverable-transition";
+import { isUnpublished } from "../campaigns/campaign-status";
 import { DRAFT_URL_MESSAGE, isUploadedFileUrl, isValidDraftUrl } from "./drive-url";
 import { ReviewDeliverableAction } from "./dto/review-deliverable.dto";
 import type { SubmitDraftDto } from "./dto/submit-draft.dto";
@@ -903,7 +904,12 @@ export class ParticipationService {
         deliverable.participation.campaign.ratePer1kPaise,
         deliverable.participation.campaign.maxPayoutPaise,
       ),
-      creator: deliverable.participation.creator,
+      // A creator's phone number is for admins only; team members get the
+      // same shape with it blanked.
+      creator:
+        role === UserRole.admin
+          ? deliverable.participation.creator
+          : { ...deliverable.participation.creator, phone: null },
       creatorProfile: {
         id: deliverable.participation.creatorProfile.id,
         platform: deliverable.participation.creatorProfile.platform,
@@ -1147,9 +1153,11 @@ export class ParticipationService {
   ) {
     const campaign = await this.prisma.campaign.findUnique({
       where: { id: campaignId },
-      select: { ratePer1kPaise: true, maxPayoutPaise: true },
+      select: { ratePer1kPaise: true, maxPayoutPaise: true, status: true },
     });
-    if (!campaign) {
+    // A draft or not-yet-approved campaign isn't visible to creators, so
+    // neither is its leaderboard.
+    if (!campaign || isUnpublished(campaign.status)) {
       throw new NotFoundException({ code: "NOT_FOUND", message: "Campaign not found" });
     }
 

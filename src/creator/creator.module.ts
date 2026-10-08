@@ -9,6 +9,7 @@ import { CreatorCampaignsController } from "./creator-campaigns.controller";
 import { CreatorMarketplaceController } from "./creator-marketplace.controller";
 import { CreatorParticipationController } from "./creator-participation.controller";
 import { CreatorSubmissionsController } from "./creator-submissions.controller";
+import { DeliverableOwnerGuard } from "./deliverable-owner.guard";
 
 @Module({
   imports: [
@@ -18,6 +19,7 @@ import { CreatorSubmissionsController } from "./creator-submissions.controller";
     StorageModule,
     MarketplaceModule,
   ],
+  providers: [DeliverableOwnerGuard],
   controllers: [
     CreatorCampaignsController,
     CreatorParticipationController,

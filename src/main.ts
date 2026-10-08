@@ -67,19 +67,25 @@ async function bootstrap(): Promise<void> {
     },
   });
 
-  const swaggerConfig = new DocumentBuilder()
-    .setTitle("Halchal API")
-    .setDescription("Creator + brand platform API")
-    .setVersion("0.1.0")
-    .addBearerAuth()
-    .build();
-  const document = SwaggerModule.createDocument(app, swaggerConfig);
-  SwaggerModule.setup("docs", app, document);
+  // The interactive API reference lists every endpoint and input. Handy in
+  // development; in production it is a ready-made map for an attacker, so
+  // it is only served there when ENABLE_API_DOCS=true.
+  const docsEnabled = process.env.NODE_ENV !== "production" || process.env.ENABLE_API_DOCS === "true";
+  if (docsEnabled) {
+    const swaggerConfig = new DocumentBuilder()
+      .setTitle("Halchal API")
+      .setDescription("Creator + brand platform API")
+      .setVersion("0.1.0")
+      .addBearerAuth()
+      .build();
+    const document = SwaggerModule.createDocument(app, swaggerConfig);
+    SwaggerModule.setup("docs", app, document);
+  }
 
   const port = Number(process.env.PORT ?? 3001);
   await app.listen(port);
   app.get(Logger).log(`API listening on http://localhost:${port}`);
-  app.get(Logger).log(`OpenAPI docs at http://localhost:${port}/docs`);
+  if (docsEnabled) app.get(Logger).log(`OpenAPI docs at http://localhost:${port}/docs`);
 }
 
 bootstrap();

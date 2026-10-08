@@ -86,6 +86,16 @@ export class CampaignAccessService {
     });
   }
 
+  /** Whether this account still exists, is active and still has the role
+   * its token claims — the same check the API makes on every request. */
+  async isAccountActive(userId: string, role: UserRole): Promise<boolean> {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { isActive: true, role: true },
+    });
+    return Boolean(user && user.isActive && user.role === role);
+  }
+
   /** Whether a socket may subscribe to a campaign's realtime room. Brand,
    * staff and admin use the same rule as reading the campaign over HTTP;
    * creators (the mobile app) may follow any campaign that has been

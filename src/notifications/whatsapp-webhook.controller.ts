@@ -19,16 +19,27 @@ export class WhatsappWebhookController {
     @Query("hub.challenge") challenge: string,
     @Res() res: Response,
   ) {
-    if (mode === "subscribe" && token === process.env.WHATSAPP_VERIFY_TOKEN) {
-      res.status(200).send(challenge);
+    // The token must be configured and must match — an unset token never
+    // equals a missing one. The challenge is echoed as plain text and only
+    // when it is the number Meta sends, so this can't be used to make the
+    // API serve attacker-chosen markup.
+    const expected = process.env.WHATSAPP_VERIFY_TOKEN;
+    if (mode === "subscribe" && expected && token === expected && /^[0-9]{1,32}$/.test(challenge ?? "")) {
+      res.status(200).type("text/plain").send(challenge);
       return;
     }
-    res.status(403).send("Verification failed");
+    res.status(403).type("text/plain").send("Verification failed");
   }
 
   @Post()
   receive(@Req() req: Request, @Res() res: Response) {
-    this.logger.log(`WhatsApp webhook event: ${JSON.stringify(req.body)}`);
-    res.status(200).send("OK");
+    // Nothing verifies who sent this yet (no X-Hub-Signature-256 check), and
+    // the body can hold customers' phone numbers and messages — so it is
+    // acknowledged and counted, never written to the logs.
+    const entries = Array.isArray((req.body as { entry?: unknown[] })?.entry)
+      ? (req.body as { entry: unknown[] }).entry.length
+      : 0;
+    this.logger.log(`WhatsApp webhook event received (${entries} entr${entries === 1 ? "y" : "ies"})`);
+    res.status(200).type("text/plain").send("OK");
   }
 }

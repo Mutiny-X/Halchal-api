@@ -21,6 +21,9 @@ const envSchema = z.object({
    * fixed OTP codes work in production. Off by default: turn it on for a
    * store review, off again afterwards. Always on outside production.
    */
+  /** Serves the interactive API reference at /docs in production. Off by
+   * default there; always on outside production. Read in main.ts. */
+  ENABLE_API_DOCS: z.string().optional(),
   REVIEWER_OTP_ENABLED: z
     .string()
     .optional()
