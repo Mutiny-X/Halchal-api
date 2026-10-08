@@ -104,6 +104,13 @@ describe("Profile fields", () => {
     expect(apify.normalizeProfileUrl("instagram", "instagram.com/halchal?igsh=abc")).toBe("https://instagram.com/halchal");
     expect(apify.normalizeProfileUrl("youtube", "https://www.youtube.com/@halchal")).toBe("https://www.youtube.com/@halchal");
   });
+  it("a link is recognised as a platform by its host, not by text inside it", () => {
+    expect(apify.detectPlatform("https://www.instagram.com/reel/abc/")).toBe("instagram");
+    expect(apify.detectPlatform("https://youtu.be/abc")).toBe("youtube");
+    expect(apify.detectPlatform("https://evil.example/?u=instagram.com")).toBe("unknown");
+    expect(apify.detectPlatform("https://instagram.com.evil.example/reel/abc")).toBe("unknown");
+    expect(apify.detectPlatform("not a link at all")).toBe("unknown");
+  });
   it("a plain handle becomes the real profile link", () => {
     expect(apify.normalizeProfileUrl("instagram", "@halchal")).toBe("https://www.instagram.com/halchal/");
   });

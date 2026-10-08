@@ -12,7 +12,8 @@ import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { randomBytes } from "node:crypto";
 import { createReadStream, writeFileSync } from "node:fs";
 import { copyFile, unlink } from "node:fs/promises";
-import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { basename, dirname, join, resolve } from "node:path";
 
 import type { Env } from "../config/env";
 import { DIRECT_UPLOAD_CONTENT_TYPES, type DetectedFileType } from "../common/file-signature";
@@ -101,6 +102,13 @@ export class ObjectStorageService {
     folder: string,
     file: { path: string; originalname: string; mimetype: string; size: number },
   ): Promise<StoredUploadResult> {
+    // Only a temp file this server created itself (see the upload route's
+    // diskStorage: the system temp folder, a name we generate) is ever
+    // read, copied or removed here — never a path taken from a request.
+    const tempPath = resolve(file.path);
+    if (dirname(tempPath) !== resolve(tmpdir()) || !/^halchal-draft-[0-9]+-[0-9a-f]+$/.test(basename(tempPath))) {
+      throw new BadRequestException({ code: "VALIDATION_ERROR", message: "Upload could not be read" });
+    }
     const filename = uploadFilename(file.originalname, file.mimetype);
     const key = `${folder}/${filename}`;
     try {
@@ -113,7 +121,7 @@ export class ObjectStorageService {
             new PutObjectCommand({
               Bucket: this.config.get("S3_BUCKET", { infer: true }),
               Key: key,
-              Body: createReadStream(file.path),
+              Body: createReadStream(tempPath),
               ContentLength: file.size,
               ContentType: safeUploadContentType(filename),
             }),
@@ -125,11 +133,11 @@ export class ObjectStorageService {
       }
 
       const dir = ensureUploadDir(folder);
-      await copyFile(file.path, join(dir, filename));
+      await copyFile(tempPath, join(dir, filename));
       const path = `/uploads/${folder}/${filename}`;
       return { url: path, path, name: file.originalname };
     } finally {
-      await unlink(file.path).catch(() => undefined);
+      await unlink(tempPath).catch(() => undefined);
     }
   }
 

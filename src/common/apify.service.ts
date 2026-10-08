@@ -96,9 +96,19 @@ export class ApifyService {
   }
 
   detectPlatform(url: string): PlatformViewResult["platform"] {
-    if (/instagram\.com/i.test(url)) return "instagram";
-    if (/youtube\.com|youtu\.be/i.test(url)) return "youtube";
-    if (/twitter\.com|x\.com/i.test(url)) return "twitter";
+    // By host, not by text appearing somewhere in the address: a link like
+    // https://evil.example/?instagram.com is not an Instagram link.
+    let host: string;
+    try {
+      const raw = url.trim();
+      host = new URL(/^[a-z][a-z0-9+.-]*:/i.test(raw) ? raw : `https://${raw}`).hostname.toLowerCase();
+    } catch {
+      return "unknown";
+    }
+    const on = (domains: string[]) => domains.some((d) => host === d || host.endsWith(`.${d}`));
+    if (on(PROFILE_HOSTS.instagram)) return "instagram";
+    if (on(PROFILE_HOSTS.youtube)) return "youtube";
+    if (on(PROFILE_HOSTS.twitter)) return "twitter";
     return "unknown";
   }
 
