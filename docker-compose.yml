@@ -4,7 +4,8 @@ services:
     image: postgres:16-alpine
     restart: unless-stopped
     ports:
-      - "5432:5432"
+      # This machine only — not every network it is connected to.
+      - "127.0.0.1:5432:5432"
     environment:
       POSTGRES_USER: viralcut
       POSTGRES_PASSWORD: viralcut

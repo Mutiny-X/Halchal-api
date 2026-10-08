@@ -1147,6 +1147,8 @@ export class InstagramOAuthService {
       "aes-256-gcm",
       this.encryptionKey,
       Buffer.from(ivRaw, "base64url"),
+      // Only the full 16-byte tag is accepted; a shorter one is easier to forge.
+      { authTagLength: 16 },
     );
     decipher.setAuthTag(Buffer.from(tagRaw, "base64url"));
     return Buffer.concat([
