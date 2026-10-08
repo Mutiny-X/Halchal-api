@@ -155,6 +155,9 @@ export class AuthService {
         where: { userId: stored.userId, revokedAt: null },
         data: { revokedAt: new Date() },
       }),
+      this.prisma.activityLog.create({
+        data: { actorUserId: stored.userId, action: "auth.password_reset", targetType: "User", targetId: stored.userId },
+      }),
     ]);
 
     return { reset: true };
@@ -216,6 +219,13 @@ export class AuthService {
         }
         throw error;
       }
+    } else if (user.role === UserRole.creator && !user.isActive) {
+      // Suspended by an admin. (A self-deleted account has no phone number
+      // left, so it never reaches here.)
+      throw new ForbiddenException({
+        code: "ACCOUNT_SUSPENDED",
+        message: "This account has been suspended. Contact Halchal support if you think this is a mistake.",
+      });
     } else if (user.role !== UserRole.creator) {
       throw new ConflictException({
         code: "WRONG_PORTAL",

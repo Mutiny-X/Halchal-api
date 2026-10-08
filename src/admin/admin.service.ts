@@ -37,6 +37,9 @@ const ACTION_LABELS: Record<string, string> = {
   "staff.removed": "Account removed",
   "task.assigned": "Was assigned a task",
   "task.completed": "Completed a task",
+  "auth.signed_in": "Signed in",
+  "auth.password_changed": "Changed their password",
+  "auth.password_reset": "Reset their password",
 };
 
 @Injectable()
@@ -657,6 +660,58 @@ export class AdminService {
       walletAvailablePaise: c.wallet?.availablePaise ?? 0,
       walletLifetimePaise: c.wallet?.lifetimePaise ?? 0,
     }));
+  }
+
+  /**
+   * Blocks a creator's account: no sign-in, no refresh, every session and
+   * open live-update connection ended at once. For fraud and abuse cases.
+   * The account and its history stay as they are; reinstating restores
+   * access. A creator who deleted their own account can't be reinstated.
+   */
+  async suspendCreator(creatorId: string, adminUserId: string, reason?: string) {
+    const creator = await this.requireCreator(creatorId);
+    await this.prisma.$transaction([
+      this.prisma.user.update({ where: { id: creatorId }, data: { isActive: false } }),
+      this.prisma.refreshToken.updateMany({ where: { userId: creatorId, revokedAt: null }, data: { revokedAt: new Date() } }),
+      this.prisma.deviceToken.deleteMany({ where: { userId: creatorId } }),
+    ]);
+    await this.realtime.disconnectUser(creatorId);
+    await this.activityLog.log(adminUserId, "creator.suspended", {
+      targetType: "User",
+      targetId: creatorId,
+      metadata: { reason: reason?.trim().slice(0, 500) || null, wasActive: creator.isActive },
+    });
+    return { suspended: true };
+  }
+
+  async reinstateCreator(creatorId: string, adminUserId: string) {
+    const creator = await this.requireCreator(creatorId);
+    await this.prisma.user.update({ where: { id: creatorId }, data: { isActive: true } });
+    await this.activityLog.log(adminUserId, "creator.reinstated", {
+      targetType: "User",
+      targetId: creatorId,
+      metadata: { wasActive: creator.isActive },
+    });
+    return { reinstated: true };
+  }
+
+  /** A creator account that still exists — a self-deleted one has had its
+   * phone number removed and can't be suspended or brought back. */
+  private async requireCreator(creatorId: string) {
+    const creator = await this.prisma.user.findUnique({
+      where: { id: creatorId },
+      select: { id: true, role: true, isActive: true, phone: true },
+    });
+    if (!creator || creator.role !== UserRole.creator) {
+      throw new NotFoundException({ code: "NOT_FOUND", message: "Creator not found" });
+    }
+    if (!creator.phone) {
+      throw new BadRequestException({
+        code: "VALIDATION_ERROR",
+        message: "This creator deleted their account — it can't be suspended or reinstated.",
+      });
+    }
+    return creator;
   }
 
   async getCreatorDetail(creatorId: string) {

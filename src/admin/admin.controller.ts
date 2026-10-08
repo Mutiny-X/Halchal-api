@@ -21,6 +21,7 @@ import type { Response } from "express";
 import { memoryStorage } from "multer";
 
 import { CampaignInviteService } from "../auth/campaign-invite.service";
+import { AdminAuditInterceptor } from "../activity/admin-audit.interceptor";
 import { CurrentUser } from "../common/decorators/current-user.decorator";
 import { Roles } from "../common/decorators/roles.decorator";
 import { RolesGuard } from "../common/guards/roles.guard";
@@ -58,6 +59,13 @@ class RejectCampaignDto {
 class SendCampaignInviteDto {
   @IsEmail()
   email!: string;
+}
+
+class SuspendCreatorDto {
+  @IsOptional()
+  @IsString()
+  @MaxLength(500)
+  reason?: string;
 }
 
 class ReviewKycDto {
@@ -160,6 +168,7 @@ class SetPoolOverflowDto {
 @ApiTags("admin")
 @ApiBearerAuth()
 @UseGuards(JwtAuthGuard, RolesGuard, AdminSectionGuard)
+@UseInterceptors(AdminAuditInterceptor)
 @Roles(UserRole.admin)
 @Controller("admin")
 export class AdminController {
@@ -307,6 +316,22 @@ export class AdminController {
   @AdminSectionRoute("clippers")
   getCreator(@Param("id") id: string) {
     return this.admin.getCreatorDetail(id);
+  }
+
+  @Post("creators/:id/suspend")
+  @AdminSectionRoute("clippers")
+  suspendCreator(
+    @CurrentUser() user: AuthJwtPayload,
+    @Param("id") id: string,
+    @Body() body: SuspendCreatorDto,
+  ) {
+    return this.admin.suspendCreator(id, user.sub, body.reason);
+  }
+
+  @Post("creators/:id/reinstate")
+  @AdminSectionRoute("clippers")
+  reinstateCreator(@CurrentUser() user: AuthJwtPayload, @Param("id") id: string) {
+    return this.admin.reinstateCreator(id, user.sub);
   }
 
   /** Everything Instagram's Insights API reports for one of the creator's
