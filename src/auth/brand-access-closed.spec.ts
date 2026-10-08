@@ -31,8 +31,10 @@ describe("brand access is closed", () => {
   it("refuses a brand signing in, even with the right password", async () => {
     const { service, prisma } = makeService();
     prisma.user.findUnique.mockResolvedValue({ id: "b", role: UserRole.brand, passwordHash: await bcrypt.hash("pw", 4) });
+    // Same answer as a wrong password — the sign-in page never says what
+    // kind of account an email belongs to.
     await expect(service.loginBrand({ email: "b@x.com", password: "pw" })).rejects.toSatisfy(
-      (e) => e instanceof UnauthorizedException && code(e) === "BRAND_ACCESS_CLOSED",
+      (e) => e instanceof UnauthorizedException && code(e) === "UNAUTHORIZED",
     );
   });
 
@@ -85,9 +87,12 @@ describe("brand access is closed", () => {
     await expect(strategy.validate({ sub: "s", role: "staff" } as never)).rejects.toBeInstanceOf(UnauthorizedException);
     prisma.user.findUnique.mockResolvedValueOnce(null);
     await expect(strategy.validate({ sub: "s", role: "staff" } as never)).rejects.toBeInstanceOf(UnauthorizedException);
-    // Other roles aren't looked up per request.
+    // Every role is checked: a deleted creator or a deactivated admin stops too.
+    prisma.user.findUnique.mockResolvedValueOnce({ isActive: false, role: "creator" });
+    await expect(strategy.validate({ sub: "c", role: "creator" } as never)).rejects.toBeInstanceOf(UnauthorizedException);
+    prisma.user.findUnique.mockResolvedValueOnce({ isActive: true, role: "creator" });
     await expect(strategy.validate({ sub: "c", role: "creator" } as never)).resolves.toMatchObject({ sub: "c" });
-    expect(prisma.user.findUnique).toHaveBeenCalledTimes(2);
+    expect(prisma.user.findUnique).toHaveBeenCalledTimes(4);
   });
 
   it("stops brand campaign invites", async () => {

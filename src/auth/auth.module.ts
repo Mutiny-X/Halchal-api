@@ -20,6 +20,8 @@ import { OtpService } from "./otp.service";
       inject: [ConfigService],
       useFactory: (config: ConfigService<Env, true>) => ({
         secret: config.get("JWT_SECRET", { infer: true }),
+        signOptions: { algorithm: "HS256" },
+        verifyOptions: { algorithms: ["HS256"] },
       }),
     }),
     NotificationsModule,

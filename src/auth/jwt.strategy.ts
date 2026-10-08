@@ -17,6 +17,7 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
       jwtFromRequest: ExtractJwt.fromAuthHeaderAsBearerToken(),
       ignoreExpiration: false,
       secretOrKey: config.get("JWT_SECRET", { infer: true }),
+      algorithms: ["HS256"],
     });
   }
 
@@ -31,16 +32,15 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
     if (payload.role === "brand") {
       throw new UnauthorizedException(BRAND_ACCESS_CLOSED);
     }
-    // A team member who is deactivated or removed stops at their next
-    // request, not when their access token happens to expire.
-    if (payload.role === "staff") {
-      const user = await this.prisma.user.findUnique({
-        where: { id: payload.sub },
-        select: { isActive: true, role: true },
-      });
-      if (!user || !user.isActive || user.role !== "staff") {
-        throw new UnauthorizedException({ code: "UNAUTHORIZED", message: "This account has been deactivated" });
-      }
+    // The token only says who signed in up to 15 minutes ago. Anyone who
+    // has since been deactivated, removed or deleted — team member, admin
+    // or creator — stops at their next request, not when the token expires.
+    const user = await this.prisma.user.findUnique({
+      where: { id: payload.sub },
+      select: { isActive: true, role: true },
+    });
+    if (!user || !user.isActive || user.role !== payload.role) {
+      throw new UnauthorizedException({ code: "UNAUTHORIZED", message: "This account has been deactivated" });
     }
     return payload;
   }

@@ -18,6 +18,7 @@ import { PrismaService } from "../prisma/prisma.service";
 import { EmailService } from "../notifications/email.service";
 import { BRAND_ACCESS_CLOSED, type AuthJwtPayload, type AuthTokens } from "./auth.types";
 import { FixedOtpService } from "./fixed-otp.service";
+import { LoginLockout } from "./login-lockout";
 import { hashRefreshToken, normalizePhone, OtpService } from "./otp.service";
 import type { AdminLoginDto } from "./dto/admin-auth.dto";
 import type { BrandLoginDto, BrandRegisterDto } from "./dto/brand-auth.dto";
@@ -33,6 +34,9 @@ export class AuthService {
     private readonly email: EmailService,
   ) {}
 
+  /** Wrong-password lockout per email, shared by both password sign-ins. */
+  private readonly lockout = new LoginLockout();
+
   /** Brand self sign-up is closed (see BRAND_ACCESS_CLOSED) — admins add
    * brands from the admin panel instead. The route stays so an old sign-up
    * page or a direct call gets a clear answer rather than a 404. */
@@ -44,62 +48,40 @@ export class AuthService {
   }
 
   async loginAdmin(dto: AdminLoginDto) {
-    const email = dto.email.toLowerCase();
-    const user = await this.prisma.user.findUnique({ where: { email } });
-
-    if (!user?.passwordHash || user.role !== UserRole.admin) {
-      throw invalidAdminCredentials();
-    }
-
-    const ok = await bcrypt.compare(dto.password, user.passwordHash);
-    if (!ok) {
-      throw invalidAdminCredentials();
-    }
-
-    return this.issueTokens(user);
+    return this.passwordLogin(dto.email, dto.password, [UserRole.admin]);
   }
 
+  /** The team sign-in page. Admins may sign in here too — the website sends
+   * them to the admin portal by their role — so no answer ever has to say
+   * "wrong portal" and reveal what kind of account an email belongs to. */
   async loginBrand(dto: BrandLoginDto) {
-    const email = dto.email.toLowerCase();
+    return this.passwordLogin(dto.email, dto.password, [UserRole.staff, UserRole.admin]);
+  }
+
+  /**
+   * One path for every password sign-in. Every failure — unknown email,
+   * wrong role, deactivated account, wrong password — gets the same answer
+   * after the same amount of work (a bcrypt compare always runs), so
+   * neither the message nor the response time says whether an account
+   * exists or what it is.
+   */
+  private async passwordLogin(rawEmail: string, password: string, roles: UserRole[]) {
+    const email = rawEmail.toLowerCase();
+    this.lockout.assertNotLocked(email);
+
     const user = await this.prisma.user.findUnique({ where: { email } });
+    const eligible = Boolean(
+      user?.passwordHash && roles.includes(user.role) && user.isActive !== false,
+    );
+    const ok = await bcrypt.compare(password, eligible ? user!.passwordHash! : TIMING_DUMMY_HASH);
 
-    if (!user?.passwordHash) {
-      throw invalidBrandCredentials();
+    if (!eligible || !ok) {
+      this.lockout.recordFailure(email);
+      throw invalidCredentials();
     }
 
-    if (user.role === UserRole.creator) {
-      throw new UnauthorizedException({
-        code: "WRONG_PORTAL",
-        message:
-          "This email is registered as a creator. Use the creator app to sign in.",
-      });
-    }
-
-    if (user.role === UserRole.admin) {
-      throw new UnauthorizedException({
-        code: "WRONG_PORTAL",
-        message: "Use the admin portal to sign in.",
-      });
-    }
-
-    if (user.role === UserRole.brand) {
-      throw new UnauthorizedException(BRAND_ACCESS_CLOSED);
-    }
-
-    if (user.role !== UserRole.staff) {
-      throw invalidBrandCredentials();
-    }
-
-    if (user.role === UserRole.staff && !user.isActive) {
-      throw invalidBrandCredentials();
-    }
-
-    const ok = await bcrypt.compare(dto.password, user.passwordHash);
-    if (!ok) {
-      throw invalidBrandCredentials();
-    }
-
-    return this.issueTokens(user);
+    this.lockout.recordSuccess(email);
+    return this.issueTokens(user!);
   }
 
   async forgotBrandPassword(email: string): Promise<{ sent: boolean }> {
@@ -297,6 +279,20 @@ export class AuthService {
       include: { user: true },
     });
 
+    // A refresh token is single-use, so one that was already used turning
+    // up again means someone else holds a copy. Sign that account out
+    // everywhere. A short grace period covers the honest case of two
+    // requests racing with the same token (two tabs, a retried request).
+    if (stored?.revokedAt && stored.user) {
+      const sinceRevoked = Date.now() - stored.revokedAt.getTime();
+      if (sinceRevoked > REFRESH_REUSE_GRACE_MS && stored.expiresAt >= new Date()) {
+        await this.prisma.refreshToken.updateMany({
+          where: { userId: stored.user.id, revokedAt: null },
+          data: { revokedAt: new Date() },
+        });
+      }
+    }
+
     if (
       !stored ||
       stored.revokedAt ||
@@ -310,12 +306,9 @@ export class AuthService {
     }
 
     // A session can't outlive the account's access: brands are closed out,
-    // and a deactivated team member stops at their next refresh instead of
-    // staying signed in for as long as they keep the tab open.
-    if (
-      stored.user.role === UserRole.brand ||
-      (stored.user.role === UserRole.staff && !stored.user.isActive)
-    ) {
+    // and anyone deactivated or removed stops at their next refresh instead
+    // of staying signed in for as long as they keep the tab open.
+    if (stored.user.role === UserRole.brand || !stored.user.isActive) {
       await this.prisma.refreshToken.updateMany({
         where: { userId: stored.user.id, revokedAt: null },
         data: { revokedAt: new Date() },
@@ -367,11 +360,11 @@ export class AuthService {
     phone: string | null;
     displayName: string | null;
   }) {
+    // Only what the guards need. Tokens are readable by anyone holding
+    // one, so the email and phone number stay out of them.
     const payload: AuthJwtPayload = {
       sub: user.id,
       role: user.role,
-      email: user.email,
-      phone: user.phone,
     };
 
     const accessTtl = this.config.get("JWT_ACCESS_TTL", { infer: true });
@@ -412,19 +405,21 @@ export class AuthService {
 }
 
 
-function invalidBrandCredentials(): UnauthorizedException {
+function invalidCredentials(): UnauthorizedException {
   return new UnauthorizedException({
     code: "UNAUTHORIZED",
     message: "Invalid email or password",
   });
 }
 
-function invalidAdminCredentials(): UnauthorizedException {
-  return new UnauthorizedException({
-    code: "UNAUTHORIZED",
-    message: "Invalid email or password",
-  });
-}
+/** A used refresh token presented again within this window is treated as
+ * two honest requests racing, not as a stolen copy. */
+const REFRESH_REUSE_GRACE_MS = 30_000;
+
+/** A real bcrypt hash (cost 12) of a random throwaway value, made once at
+ * startup — compared against when there is no account hash to check, so a
+ * failed sign-in costs the same time whether or not the account exists. */
+const TIMING_DUMMY_HASH = bcrypt.hashSync(randomBytes(16).toString("hex"), 12);
 
 function parseRefreshDays(ttl: string): number {
   if (ttl.endsWith("d")) {

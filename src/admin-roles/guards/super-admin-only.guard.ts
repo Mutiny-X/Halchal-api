@@ -1,4 +1,4 @@
-import { CanActivate, ExecutionContext, ForbiddenException, Injectable } from "@nestjs/common";
+import { CanActivate, ExecutionContext, ForbiddenException, Injectable, UnauthorizedException } from "@nestjs/common";
 
 import type { AuthJwtPayload } from "../../auth/auth.types";
 import { AdminRolesService } from "../admin-roles.service";
@@ -13,7 +13,11 @@ export class SuperAdminOnlyGuard implements CanActivate {
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
     const { user } = context.switchToHttp().getRequest<{ user: AuthJwtPayload }>();
-    if (!user) return true; // JwtAuthGuard already handles unauthenticated requests
+    // JwtAuthGuard runs first and attaches the user. If this guard is ever
+    // used without it, refuse rather than wave the request through.
+    if (!user) {
+      throw new UnauthorizedException({ code: "UNAUTHORIZED", message: "Sign in required" });
+    }
 
     const permissions = await this.adminRoles.getEffectivePermissions(user.sub);
     if (!permissions.isSuperAdmin) {

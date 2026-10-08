@@ -20,7 +20,8 @@ import { CampaignAccessService } from "../access/campaign-access.service";
 @WebSocketGateway({
   namespace: "/realtime",
   cors: {
-    origin: process.env.CORS_ORIGINS?.split(",").map((o) => o.trim()) ?? true,
+    // Never "any website" — with nothing configured it is the local portal.
+    origin: (process.env.CORS_ORIGINS ?? "http://localhost:3000").split(",").map((o) => o.trim()).filter(Boolean),
     credentials: true,
   },
 })
@@ -53,6 +54,7 @@ export class RealtimeGateway
 
       const payload = await this.jwt.verifyAsync<AuthJwtPayload>(token, {
         secret: this.config.get("JWT_SECRET", { infer: true }),
+        algorithms: ["HS256"],
       });
 
       // Brands don't sign in any more — no live updates for an old session.

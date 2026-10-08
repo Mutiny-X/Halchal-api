@@ -564,7 +564,7 @@ export class AdminController {
     @Param("id") campaignId: string,
     @Res() res: Response,
   ) {
-    const generatedByName = user.email ?? user.phone ?? "Halchal Admin";
+    const generatedByName = await this.admin.actorLabel(user.sub);
     const pdf = await this.campaignReport.generatePdf(campaignId, generatedByName);
     res.set({
       "Content-Type": "application/pdf",
@@ -580,7 +580,7 @@ export class AdminController {
     @Param("id") campaignId: string,
     @Res() res: Response,
   ) {
-    const generatedByName = user.email ?? user.phone ?? "Halchal Admin";
+    const generatedByName = await this.admin.actorLabel(user.sub);
     const csv = await this.campaignReport.generateLedgerCsv(campaignId, generatedByName);
     res.set({
       "Content-Type": "text/csv; charset=utf-8",

@@ -22,6 +22,16 @@ import { Logger } from "nestjs-pino";
 import { AppModule } from "./app.module";
 // force restart: pick up updated INSTAGRAM_OAUTH_SCOPES from .env
 
+/** The websites allowed to call the API. Never "any website": with nothing
+ * configured (local development only — production refuses to start without
+ * CORS_ORIGINS) it is the local portal. */
+function corsOrigins(): string[] {
+  return (process.env.CORS_ORIGINS ?? "http://localhost:3000")
+    .split(",")
+    .map((o) => o.trim())
+    .filter(Boolean);
+}
+
 async function bootstrap(): Promise<void> {
   const app = await NestFactory.create<NestExpressApplication>(AppModule, {
     bufferLogs: true,
@@ -38,7 +48,7 @@ async function bootstrap(): Promise<void> {
     }),
   );
   app.enableCors({
-    origin: process.env.CORS_ORIGINS?.split(",").map((o) => o.trim()) ?? true,
+    origin: corsOrigins(),
     credentials: true,
   });
 

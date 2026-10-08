@@ -6,13 +6,25 @@ const envSchema = z.object({
     .default("development"),
   PORT: z.coerce.number().default(3001),
   DATABASE_URL: z.string().min(1),
-  JWT_SECRET: z.string().min(16),
+  /** Signs every sign-in token. At least 32 random characters. */
+  JWT_SECRET: z.string().min(32, "JWT_SECRET must be at least 32 characters"),
   JWT_ACCESS_TTL: z.string().default("15m"),
   JWT_REFRESH_TTL: z.string().default("7d"),
   /** Password reset link lifetime, e.g. `1h`, `30m` */
   PASSWORD_RESET_TTL: z.string().default("1h"),
   REDIS_URL: z.string().optional(),
+  /** Comma-separated websites allowed to call the API. Required in
+   * production (see validateEnv) — there is no safe value to assume. */
   CORS_ORIGINS: z.string().default("http://localhost:3000"),
+  /**
+   * Lets the App Store / Play Store reviewer phone numbers and per-account
+   * fixed OTP codes work in production. Off by default: turn it on for a
+   * store review, off again afterwards. Always on outside production.
+   */
+  REVIEWER_OTP_ENABLED: z
+    .string()
+    .optional()
+    .transform((v) => v === "true" || v === "1"),
   /** Unified portal public URL (reset links, invite links). */
   WEB_URL: z.string().url().default("http://localhost:3000"),
   /** Staff portal URL — used in welcome emails. Falls back to WEB_URL if unset. */
@@ -185,6 +197,11 @@ export function validateEnv(
   if (!normalized.WEB_URL) {
     normalized.WEB_URL =
       normalized.BRAND_WEB_URL ?? normalized.AGENCY_WEB_URL ?? "http://localhost:3000";
+  }
+  if (normalized.NODE_ENV === "production" && !String(normalized.CORS_ORIGINS ?? "").trim()) {
+    throw new Error(
+      "Invalid environment: CORS_ORIGINS is required in production (comma-separated website addresses allowed to call the API)",
+    );
   }
   const parsed = envSchema.safeParse(normalized);
   if (!parsed.success) {

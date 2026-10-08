@@ -102,12 +102,14 @@ export class AuthController {
   }
 
   @Post("refresh")
+  @Throttle({ default: { limit: 30, ttl: 60_000 } })
   @ApiOkResponse({ type: AuthResponseDto })
   refresh(@Body() dto: RefreshTokenDto) {
     return this.auth.refresh(dto.refreshToken);
   }
 
   @Post("logout")
+  @Throttle({ default: { limit: 30, ttl: 60_000 } })
   logout(@Body() dto: RefreshTokenDto) {
     return this.auth.logout(dto.refreshToken);
   }

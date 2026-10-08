@@ -49,6 +49,10 @@ export class CampaignAccessService {
       return;
     }
 
+    // Unreachable in practice: brand accounts can't sign in or hold a
+    // session (see BRAND_ACCESS_CLOSED), so no request arrives with this
+    // role. Kept because the campaign rules for a brand-owned edit are
+    // still exercised through it.
     if (role === UserRole.brand) {
       const brandProfileId = await this.getBrandProfileIdForUser(userId);
       if (brandProfileId && campaign.brandProfileId === brandProfileId) {

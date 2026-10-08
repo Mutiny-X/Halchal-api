@@ -36,16 +36,25 @@ export class FixedOtpService {
 
   /**
    * Fixed OTP from three mechanisms (checked in order):
-   * 1. REVIEWER_ACCOUNTS — hardcoded test phones that work in all environments.
+   * 1. REVIEWER_ACCOUNTS — hardcoded App Store / Play Store reviewer phones.
    * 2. OTP_DEV_BYPASS_CODE — any valid +91 phone in NODE_ENV=development only.
-   * 3. User.fixedOtpCode — per-account static OTP (demo seed users); works in all envs.
+   * 3. User.fixedOtpCode — per-account static OTP (demo seed users).
+   *
+   * 1 and 3 are a well-known static code on a real sign-in, so in
+   * production they only work while REVIEWER_OTP_ENABLED=true — switch it
+   * on for a store review and off again afterwards. Outside production
+   * they always work.
    */
   async getFixedCodeForPhone(phone: string): Promise<string | null> {
+    const fixedCodesAllowed = this.fixedCodesAllowed();
+
     const reviewerCode = FixedOtpService.REVIEWER_ACCOUNTS[phone];
-    if (reviewerCode) return reviewerCode;
+    if (reviewerCode) return fixedCodesAllowed ? reviewerCode : null;
 
     const devBypass = this.getDevBypassCode();
     if (devBypass) return devBypass;
+
+    if (!fixedCodesAllowed) return null;
 
     const user = await this.prisma.user.findUnique({
       where: { phone },
@@ -53,6 +62,11 @@ export class FixedOtpService {
     });
     const code = user?.fixedOtpCode?.trim();
     return code && code.length === 6 ? code : null;
+  }
+
+  private fixedCodesAllowed(): boolean {
+    if (this.config.get("NODE_ENV", { infer: true }) !== "production") return true;
+    return this.config.get("REVIEWER_OTP_ENABLED", { infer: true }) === true;
   }
 
   private getDevBypassCode(): string | null {
