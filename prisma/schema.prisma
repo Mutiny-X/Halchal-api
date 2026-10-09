@@ -218,6 +218,10 @@ model User {
 
   passwordHash String? @map("password_hash")
 
+  /// True while the password is one an admin chose or generated. Until the person
+  /// sets their own, the API only lets them change it (or sign out).
+  mustChangePassword Boolean @default(false) @map("must_change_password")
+
   displayName String? @map("display_name")
 
   avatarUrl String? @map("avatar_url")
@@ -353,6 +357,7 @@ model User {
   deviceTokens DeviceToken[]
 
   instagramOAuthTransactions InstagramOAuthTransaction[]
+  youtubeOAuthTransactions YoutubeOAuthTransaction[]
 
   instagramConnections InstagramConnection[]
 
@@ -814,6 +819,7 @@ model CreatorProfile {
   participations CampaignParticipation[]
 
   instagramOAuthTransactions InstagramOAuthTransaction[]
+  youtubeOAuthTransactions YoutubeOAuthTransaction[]
 
   instagramConnections InstagramConnection[]
 
@@ -824,6 +830,54 @@ model CreatorProfile {
   @@unique([userId, platform, handle])
   @@index([userId])
   @@map("creator_profiles")
+}
+
+/// Wrong-password count per email, shared by every API instance and kept across
+/// restarts. Keyed on whatever email was typed — existing account or not — so a
+/// lock never reveals whether an account exists. Rows are tiny and swept nightly.
+model LoginLockout {
+  email String @id
+
+  failures Int @default(0)
+
+  windowStart DateTime @map("window_start")
+
+  lockedUntil DateTime? @map("locked_until")
+
+  @@index([windowStart])
+  @@map("login_lockouts")
+}
+
+/// One YouTube connect attempt: created when the app asks for the Google
+/// sign-in URL, spent when the app hands back the code. Binds the OAuth `state`
+/// to the account and profile that started it, so a code obtained by someone
+/// else can't be linked to a different account, and holds the PKCE verifier
+/// server-side (the app never sees it).
+model YoutubeOAuthTransaction {
+  id String @id @default(cuid())
+
+  stateHash String @unique @map("state_hash")
+
+  codeVerifier String @map("code_verifier")
+
+  userId String @map("user_id")
+
+  creatorProfileId String @map("creator_profile_id")
+
+  expiresAt DateTime @map("expires_at")
+
+  consumedAt DateTime? @map("consumed_at")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  creatorProfile CreatorProfile @relation(fields: [creatorProfileId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([creatorProfileId])
+  @@index([expiresAt])
+  @@map("youtube_oauth_transactions")
 }
 
 model InstagramOAuthTransaction {
@@ -1181,6 +1235,12 @@ model PayoutMethod {
   isDefault Boolean @default(false) @map("is_default")
 
   createdAt DateTime @default(now()) @map("created_at")
+
+  /// When the details a payment goes to last changed (set on create, and on
+  /// any edit to holder name / IFSC / bank / PAN — not on a relabel). A
+  /// withdrawal to this method is held until PAYOUT_METHOD_COOLDOWN_HOURS
+  /// after this, so a hijacked session can't add an account and cash out at once.
+  detailsChangedAt DateTime @default(now()) @map("details_changed_at")
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 

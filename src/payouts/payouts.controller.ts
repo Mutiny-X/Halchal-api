@@ -51,6 +51,9 @@ export class PayoutsController {
     return this.payouts.revealAccountNumber(user.sub, id);
   }
 
+  // Adding bank details starts the withdrawal hold and sends a notification,
+  // so it is limited like the other sensitive account actions.
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
   @Post("payout-methods")
   @ApiOkResponse({ type: PayoutMethodDto })
   createMethod(
@@ -60,6 +63,7 @@ export class PayoutsController {
     return this.payouts.createPayoutMethod(user.sub, dto);
   }
 
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
   @Patch("payout-methods/:id")
   @ApiOkResponse({ type: PayoutMethodDto })
   updateMethod(
@@ -86,6 +90,9 @@ export class PayoutsController {
     return this.payouts.deletePayoutMethod(user.sub, id);
   }
 
+  // A creator can make one withdrawal a day, so a handful of tries a minute
+  // is plenty — this just stops scripted hammering of the money endpoint.
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
   @Post("withdrawals")
   @ApiOkResponse({ type: WithdrawalDto })
   withdraw(

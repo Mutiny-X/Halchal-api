@@ -24,6 +24,13 @@ const envSchema = z.object({
   /** Serves the interactive API reference at /docs in production. Off by
    * default there; always on outside production. Read in main.ts. */
   ENABLE_API_DOCS: z.string().optional(),
+  /** Two-person rule for payments: when true, the admin who exported a payment
+   * sheet can't be the one who records it as paid or failed (or imports its
+   * results) — a different admin must. Leave off if only one admin handles payouts. */
+  PAYOUT_REQUIRE_SECOND_ADMIN: z
+    .string()
+    .optional()
+    .transform((v) => v === "true" || v === "1"),
   REVIEWER_OTP_ENABLED: z
     .string()
     .optional()
@@ -39,6 +46,8 @@ const envSchema = z.object({
   /** Brand owner invite link lifetime, e.g. `7d` */
   BRAND_INVITE_TTL: z.string().default("7d"),
   WITHDRAWAL_FEE_BPS: z.coerce.number().default(500),
+  /** Meta app secret — signs webhook calls (X-Hub-Signature-256). Webhook POSTs are refused while unset. */
+  WHATSAPP_APP_SECRET: z.string().optional(),
   WHATSAPP_PHONE_NUMBER_ID: z.string().optional(),
   WHATSAPP_ACCESS_TOKEN: z.string().optional(),
   WHATSAPP_API_VERSION: z.string().default("v25.0"),
@@ -82,6 +91,10 @@ const envSchema = z.object({
   S3_ACCESS_KEY_ID: z.string().optional(),
   S3_SECRET_ACCESS_KEY: z.string().optional(),
   S3_PUBLIC_BASE_URL: z.string().url().optional(),
+  /** A second bucket with NO public access, for identity documents (KYC / PAN /
+   * Aadhaar). Same endpoint and credentials as S3_BUCKET. Unset = they share the
+   * public bucket (dev only — production logs a warning). */
+  S3_PRIVATE_BUCKET: z.string().optional(),
   /** Latest published version, e.g. "1.2.0". Unset = no update banner shown. */
   APP_LATEST_IOS_VERSION: z.string().optional(),
   APP_LATEST_ANDROID_VERSION: z.string().optional(),
@@ -126,6 +139,11 @@ const envSchema = z.object({
     .default("false")
     .transform((v) => v === "true" || v === "1"),
   PAYOUT_ACCOUNT_ENCRYPTION_KEY: z.string().optional(),
+  /** How long after a creator adds or changes bank details before a
+   * withdrawal to them is allowed. Gives a creator (and support) time to
+   * notice if someone with a stolen session swapped in their own account.
+   * 0 turns the hold off. */
+  PAYOUT_METHOD_COOLDOWN_HOURS: z.coerce.number().min(0).max(720).default(24),
   /** Gemini API key for the automated proof-of-work review pipeline's Tier 2
    * content-compliance checks (draft and live-proof stages both use this). */
   GEMINI_API_KEY: z.string().optional(),
@@ -215,6 +233,37 @@ export function validateEnv(
   }
 
   const env = parsed.data;
+  if (env.NODE_ENV === "production" && env.S3_BUCKET && !env.S3_PRIVATE_BUCKET) {
+    console.warn(
+      "[env] S3_PRIVATE_BUCKET is not set: KYC, PAN and Aadhaar documents are being stored in the PUBLIC bucket, readable by anyone who has a link. Create a private bucket and set S3_PRIVATE_BUCKET.",
+    );
+  }
+  if (env.NODE_ENV === "production") {
+    // Stored OAuth tokens must not be encrypted with the login-signing secret.
+    const oauthKeys: [string, string | undefined, string | undefined][] = [
+      ["INSTAGRAM_TOKEN_ENCRYPTION_KEY", env.INSTAGRAM_APP_SECRET, env.INSTAGRAM_TOKEN_ENCRYPTION_KEY],
+      ["YOUTUBE_TOKEN_ENCRYPTION_KEY", env.GOOGLE_CLIENT_SECRET, env.YOUTUBE_TOKEN_ENCRYPTION_KEY],
+    ];
+    for (const [name, integrationSecret, key] of oauthKeys) {
+      if (!integrationSecret) continue; // integration not configured
+      if (!key?.trim() || key.trim().length < 32 || key.trim() === env.JWT_SECRET) {
+        throw new Error(
+          `Invalid environment: ${name} is required in production (at least 32 random characters, different from JWT_SECRET) because that integration is configured`,
+        );
+      }
+    }
+    const payoutKey = env.PAYOUT_ACCOUNT_ENCRYPTION_KEY?.trim();
+    if (!payoutKey || payoutKey.length < 32) {
+      throw new Error(
+        "Invalid environment: PAYOUT_ACCOUNT_ENCRYPTION_KEY is required in production (at least 32 characters, generated randomly). Bank account numbers must not be encrypted with the login-signing secret.",
+      );
+    }
+    if (payoutKey === env.JWT_SECRET) {
+      throw new Error(
+        "Invalid environment: PAYOUT_ACCOUNT_ENCRYPTION_KEY must be different from JWT_SECRET",
+      );
+    }
+  }
   if (
     env.OTP_DEV_BYPASS_CODE &&
     env.NODE_ENV !== "development"

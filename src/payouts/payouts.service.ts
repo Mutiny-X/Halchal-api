@@ -17,11 +17,13 @@ import {
 import type { Env } from "../config/env";
 import { InAppNotificationService } from "../notifications/in-app-notification.service";
 import { PrismaService } from "../prisma/prisma.service";
+import { formatHoldEnd, payoutMethodHoldUntil } from "./payout-method-hold";
 import type { CreatePayoutMethodDto, CreateWithdrawalDto, UpdatePayoutMethodDto } from "./dto/payout.dto";
 import {
-  decryptPayoutAccount,
-  derivePayoutKey,
+  decryptPayoutAccountWithKeys,
   encryptPayoutAccount,
+  resolvePayoutKeys,
+  type PayoutKeys,
 } from "./payout-account-crypto";
 
 /** Payment details frozen onto a withdrawal at request time. The account
@@ -57,19 +59,19 @@ export class PayoutsService {
    * base64url-joined) — never in plaintext. Same pattern as the Instagram/
    * YouTube OAuth token encryption in creator-profiles.
    */
-  private get encryptionKey(): Buffer {
-    return derivePayoutKey(
-      this.config.get("PAYOUT_ACCOUNT_ENCRYPTION_KEY", { infer: true }) ??
-        this.config.get("JWT_SECRET", { infer: true }),
+  private get payoutKeys(): PayoutKeys {
+    return resolvePayoutKeys(
+      this.config.get("PAYOUT_ACCOUNT_ENCRYPTION_KEY", { infer: true }),
+      this.config.get("JWT_SECRET", { infer: true }),
     );
   }
 
   private encryptAccount(value: string): string {
-    return encryptPayoutAccount(this.encryptionKey, value);
+    return encryptPayoutAccount(this.payoutKeys.primary, value);
   }
 
   private decryptAccount(value: string): string {
-    const plain = decryptPayoutAccount(this.encryptionKey, value);
+    const plain = decryptPayoutAccountWithKeys(this.payoutKeys, value);
     if (plain === null) {
       throw new BadRequestException({
         code: "PAYOUT_ACCOUNT_INVALID",
@@ -123,6 +125,8 @@ export class PayoutsService {
         isDefault,
       },
     });
+
+    await this.notifyPayoutMethodChanged(userId, method.label, "added");
 
     return {
       id: method.id,
@@ -197,9 +201,18 @@ export class PayoutsService {
     if (!method) {
       throw new NotFoundException({ code: "NOT_FOUND", message: "Payout method not found" });
     }
+    // A relabel isn't a change to where money goes; anything else is, and
+    // restarts the hold on withdrawing to this method.
+    const detailsChanged =
+      (dto.accountHolderName !== undefined && dto.accountHolderName !== method.accountHolderName) ||
+      (dto.ifscCode !== undefined && dto.ifscCode !== method.ifscCode) ||
+      (dto.bankName !== undefined && dto.bankName !== method.bankName) ||
+      (dto.panNumber !== undefined && dto.panNumber !== method.panNumber);
+
     const updated = await this.prisma.payoutMethod.update({
       where: { id: methodId },
       data: {
+        ...(detailsChanged && { detailsChangedAt: new Date() }),
         ...(dto.accountHolderName !== undefined && { accountHolderName: dto.accountHolderName }),
         ...(dto.ifscCode !== undefined && { ifscCode: dto.ifscCode }),
         ...(dto.bankName !== undefined && { bankName: dto.bankName }),
@@ -207,6 +220,8 @@ export class PayoutsService {
         ...(dto.label !== undefined && { label: dto.label }),
       },
     });
+    if (detailsChanged) await this.notifyPayoutMethodChanged(userId, updated.label, "updated");
+
     return {
       id: updated.id,
       type: updated.type,
@@ -282,6 +297,17 @@ export class PayoutsService {
       throw new NotFoundException({
         code: "NOT_FOUND",
         message: "Payout method not found",
+      });
+    }
+
+    const holdUntil = payoutMethodHoldUntil(
+      payoutMethod.detailsChangedAt ?? payoutMethod.createdAt,
+      Number(this.config.get("PAYOUT_METHOD_COOLDOWN_HOURS", { infer: true })),
+    );
+    if (holdUntil && holdUntil.getTime() > Date.now()) {
+      throw new BadRequestException({
+        code: "PAYOUT_METHOD_ON_HOLD",
+        message: `You changed these bank details recently. For your safety, withdrawals to them open on ${formatHoldEnd(holdUntil)}. Didn't make this change? Contact Halchal support.`,
       });
     }
 
@@ -421,6 +447,19 @@ export class PayoutsService {
     });
 
     return this.formatWithdrawal(result.withdrawal);
+  }
+
+  /** Tells the creator their payout details changed — if it wasn't them, this
+   * is how they find out — and that withdrawals to them are on hold for a while. */
+  private async notifyPayoutMethodChanged(userId: string, label: string, what: "added" | "updated") {
+    const hours = Number(this.config.get("PAYOUT_METHOD_COOLDOWN_HOURS", { infer: true }));
+    const hold = Number.isFinite(hours) && hours > 0 ? ` Withdrawals to them open ${hours} hour${hours === 1 ? "" : "s"} after the change.` : "";
+    await this.notifications.create(userId, "creator", {
+      type: "payout_method_changed",
+      title: `Bank details ${what}`,
+      body: `Your ${label} payout details were ${what}.${hold} If this wasn't you, contact Halchal support right away.`,
+      link: "/wallet",
+    });
   }
 
   async listWithdrawals(userId: string, limit = 20) {

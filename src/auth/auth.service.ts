@@ -18,7 +18,7 @@ import { PrismaService } from "../prisma/prisma.service";
 import { EmailService } from "../notifications/email.service";
 import { BRAND_ACCESS_CLOSED, type AuthJwtPayload, type AuthTokens } from "./auth.types";
 import { FixedOtpService } from "./fixed-otp.service";
-import { LoginLockout } from "./login-lockout";
+import { LoginLockout, PrismaLockoutStore } from "./login-lockout";
 import { hashRefreshToken, normalizePhone, OtpService } from "./otp.service";
 import type { AdminLoginDto } from "./dto/admin-auth.dto";
 import type { BrandLoginDto, BrandRegisterDto } from "./dto/brand-auth.dto";
@@ -32,10 +32,13 @@ export class AuthService {
     private readonly config: ConfigService<Env, true>,
     private readonly otp: OtpService,
     private readonly email: EmailService,
-  ) {}
+  ) {
+    this.lockout = new LoginLockout(new PrismaLockoutStore(prisma));
+  }
 
-  /** Wrong-password lockout per email, shared by both password sign-ins. */
-  private readonly lockout = new LoginLockout();
+  /** Wrong-password lockout per email, shared by both password sign-ins and,
+   * because it lives in the database, by every API instance. */
+  private readonly lockout: LoginLockout;
 
   /** Brand self sign-up is closed (see BRAND_ACCESS_CLOSED) — admins add
    * brands from the admin panel instead. The route stays so an old sign-up
@@ -66,8 +69,18 @@ export class AuthService {
    * exists or what it is.
    */
   private async passwordLogin(rawEmail: string, password: string, roles: UserRole[]) {
+    return this.issueTokens(await this.authenticatePassword(rawEmail, password, roles));
+  }
+
+  /**
+   * Proves someone knows an account's password — same lockout, same timing,
+   * same single answer for every failure as a normal sign-in — without
+   * starting a session. For flows that must re-check ownership before doing
+   * something sensitive (e.g. accepting a campaign invite on an existing account).
+   */
+  async authenticatePassword(rawEmail: string, password: string, roles: UserRole[]) {
     const email = rawEmail.toLowerCase();
-    this.lockout.assertNotLocked(email);
+    await this.lockout.assertNotLocked(email);
 
     const user = await this.prisma.user.findUnique({ where: { email } });
     const eligible = Boolean(
@@ -76,12 +89,12 @@ export class AuthService {
     const ok = await bcrypt.compare(password, eligible ? user!.passwordHash! : TIMING_DUMMY_HASH);
 
     if (!eligible || !ok) {
-      this.lockout.recordFailure(email);
+      await this.lockout.recordFailure(email);
       throw invalidCredentials();
     }
 
-    this.lockout.recordSuccess(email);
-    return this.issueTokens(user!);
+    await this.lockout.recordSuccess(email);
+    return user!;
   }
 
   async forgotBrandPassword(email: string): Promise<{ sent: boolean }> {
@@ -145,7 +158,7 @@ export class AuthService {
     await this.prisma.$transaction([
       this.prisma.user.update({
         where: { id: stored.userId },
-        data: { passwordHash },
+        data: { passwordHash, mustChangePassword: false },
       }),
       this.prisma.passwordResetToken.update({
         where: { id: stored.id },
@@ -369,6 +382,7 @@ export class AuthService {
     email: string | null;
     phone: string | null;
     displayName: string | null;
+    mustChangePassword?: boolean;
   }) {
     // Only what the guards need. Tokens are readable by anyone holding
     // one, so the email and phone number stay out of them.
@@ -409,6 +423,8 @@ export class AuthService {
         email: user.email,
         phone: user.phone,
         displayName: user.displayName,
+        // The client should send this person straight to "choose a new password".
+        mustChangePassword: user.mustChangePassword === true,
       },
     };
   }

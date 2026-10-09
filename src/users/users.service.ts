@@ -81,7 +81,7 @@ export class UsersService {
       avatarUrl: user.avatarUrl,
       username: user.username,
       kycStatus: user.kycStatus,
-      kycDocumentUrl: user.kycDocumentUrl,
+      kycDocumentUrl: await this.storage.resolveDocumentUrl(user.kycDocumentUrl),
       kycRejectionReason: user.kycRejectionReason,
       companyName: user.brandProfile?.companyName ?? null,
       bio: user.bio,
@@ -317,7 +317,7 @@ export class UsersService {
 
     return {
       kycStatus: updated.kycStatus,
-      kycDocumentUrl: updated.kycDocumentUrl,
+      kycDocumentUrl: await this.storage.resolveDocumentUrl(updated.kycDocumentUrl),
       kycSubmittedAt: updated.kycSubmittedAt?.toISOString() ?? null,
     };
   }
@@ -436,7 +436,7 @@ export class UsersService {
 
     const passwordHash = await bcrypt.hash(newPassword, 12);
     await this.prisma.$transaction([
-      this.prisma.user.update({ where: { id: userId }, data: { passwordHash } }),
+      this.prisma.user.update({ where: { id: userId }, data: { passwordHash, mustChangePassword: false } }),
       this.prisma.refreshToken.updateMany({
         where: { userId, revokedAt: null },
         data: { revokedAt: new Date() },

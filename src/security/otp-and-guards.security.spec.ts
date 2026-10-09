@@ -120,24 +120,24 @@ describe("Creator OTP", () => {
 describe("Per-request session check (JWT strategy)", () => {
   const strat = (u: unknown) => new JwtStrategy(cfg() as never, { user: { findUnique: vi.fn().mockResolvedValue(u) } } as never);
   it("rejects a token without a user id or role", async () => {
-    expect(await status(strat(null).validate({} as never))).toBe(401);
+    expect(await status(strat(null).validate({ method: "GET", url: "/x" }, {} as never))).toBe(401);
   });
   it("rejects brand sessions", async () => {
-    expect(await status(strat(null).validate({ sub: "b", role: "brand" } as never))).toBe(401);
+    expect(await status(strat(null).validate({ method: "GET", url: "/x" }, { sub: "b", role: "brand" } as never))).toBe(401);
   });
   for (const [label, u] of [["deactivated", { isActive: false, role: "staff" }], ["removed", null], ["no longer staff", { isActive: true, role: "creator" }]] as const) {
     it(`rejects a ${label} team member immediately`, async () => {
-      expect(await status(strat(u).validate({ sub: "s", role: "staff" } as never))).toBe(401);
+      expect(await status(strat(u).validate({ method: "GET", url: "/x" }, { sub: "s", role: "staff" } as never))).toBe(401);
     });
   }
   it("accepts an active team member", async () => {
-    expect(await status(strat({ isActive: true, role: "staff" }).validate({ sub: "s", role: "staff" } as never))).toBe(200);
+    expect(await status(strat({ isActive: true, role: "staff" }).validate({ method: "GET", url: "/x" }, { sub: "s", role: "staff" } as never))).toBe(200);
   });
   it("rejects a deactivated admin immediately [M13]", async () => {
-    expect(await status(strat({ isActive: false, role: "admin" }).validate({ sub: "a", role: "admin" } as never))).toBe(401);
+    expect(await status(strat({ isActive: false, role: "admin" }).validate({ method: "GET", url: "/x" }, { sub: "a", role: "admin" } as never))).toBe(401);
   });
   it("rejects a creator whose account was deleted [new: deleted creator]", async () => {
-    expect(await status(strat({ isActive: false, role: "creator" }).validate({ sub: "c", role: "creator" } as never))).toBe(401);
+    expect(await status(strat({ isActive: false, role: "creator" }).validate({ method: "GET", url: "/x" }, { sub: "c", role: "creator" } as never))).toBe(401);
   });
   it("refuses expired tokens (ignoreExpiration is off)", () => {
     const s: any = strat(null);

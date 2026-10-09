@@ -14,7 +14,7 @@ import { UserRole } from "@prisma/client";
 import type { Server, Socket } from "socket.io";
 
 import type { Env } from "../config/env";
-import type { AuthJwtPayload } from "../auth/auth.types";
+import { JWT_AUDIENCE, JWT_ISSUER, type AuthJwtPayload } from "../auth/auth.types";
 import { CampaignAccessService } from "../access/campaign-access.service";
 
 @WebSocketGateway({
@@ -55,6 +55,8 @@ export class RealtimeGateway
       const payload = await this.jwt.verifyAsync<AuthJwtPayload>(token, {
         secret: this.config.get("JWT_SECRET", { infer: true }),
         algorithms: ["HS256"],
+        issuer: JWT_ISSUER,
+        audience: JWT_AUDIENCE,
       });
 
       // A valid token isn't enough: someone deactivated, removed or deleted

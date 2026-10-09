@@ -14,6 +14,7 @@ import {
 } from "node:crypto";
 
 import type { Env } from "../config/env";
+import { resolvePayoutKeys, type PayoutKeys } from "../payouts/payout-account-crypto";
 import { PrismaService } from "../prisma/prisma.service";
 import { CreatorProfilesService } from "./creator-profiles.service";
 
@@ -104,6 +105,14 @@ type YoutubeProfile = {
   fetchedAt: string;
 };
 
+/** How long a started connect attempt stays redeemable. */
+const YOUTUBE_OAUTH_TTL_MS = 10 * 60 * 1000;
+
+/** Only the hash of the state is stored, like the Instagram flow. */
+function hashOAuthState(state: string): string {
+  return createHash("sha256").update(state).digest("hex");
+}
+
 function oauthId(bytes = 24): string {
   return randomBytes(bytes).toString("base64url");
 }
@@ -129,10 +138,34 @@ export class YoutubeOAuthService {
     private readonly config: ConfigService<Env, true>,
   ) {}
 
-  async authUrl(userId: string, creatorProfileId: string, state?: string) {
+  /**
+   * Starts a connect attempt. The `state` is always minted here (anything the
+   * app sends is ignored) and remembered against this account and profile,
+   * together with a PKCE verifier that never leaves the server. The code that
+   * comes back can only be redeemed by the same account, once, within 10 minutes.
+   */
+  async authUrl(userId: string, creatorProfileId: string) {
     this.requireConfig();
     await this.profiles.assertOwnership(userId, creatorProfileId);
-    const oauthState = state?.trim() || oauthId(18);
+
+    const oauthState = oauthId(24);
+    const codeVerifier = randomBytes(32).toString("base64url");
+    const codeChallenge = createHash("sha256").update(codeVerifier).digest("base64url");
+
+    // Old, unspent attempts are just clutter.
+    await this.prisma.youtubeOAuthTransaction.deleteMany({
+      where: { OR: [{ expiresAt: { lt: new Date() } }, { userId, creatorProfileId }] },
+    });
+    await this.prisma.youtubeOAuthTransaction.create({
+      data: {
+        stateHash: hashOAuthState(oauthState),
+        codeVerifier,
+        userId,
+        creatorProfileId,
+        expiresAt: new Date(Date.now() + YOUTUBE_OAUTH_TTL_MS),
+      },
+    });
+
     const params = new URLSearchParams({
       client_id: this.googleClientId,
       redirect_uri: this.youtubeRedirectUri,
@@ -142,6 +175,8 @@ export class YoutubeOAuthService {
       prompt: "consent",
       include_granted_scopes: "true",
       state: oauthState,
+      code_challenge: codeChallenge,
+      code_challenge_method: "S256",
     });
 
     return {
@@ -162,7 +197,7 @@ export class YoutubeOAuthService {
     return this.callbackHtml(deepLink, Boolean(query.error || !query.code));
   }
 
-  async connect(userId: string, creatorProfileId: string, code: string) {
+  async connect(userId: string, creatorProfileId: string, code: string, state: string) {
     this.requireConfig();
     if (!code?.trim()) {
       throw new BadRequestException({
@@ -171,8 +206,9 @@ export class YoutubeOAuthService {
       });
     }
     await this.profiles.assertOwnership(userId, creatorProfileId);
+    const codeVerifier = await this.spendTransaction(userId, creatorProfileId, state);
 
-    const token = await this.exchangeCode(code.trim());
+    const token = await this.exchangeCode(code.trim(), codeVerifier);
     const profile = await this.fetchProfile(token.accessToken);
     const lastSyncedAt = new Date();
     const stats = this.toSocialStats(profile);
@@ -258,15 +294,18 @@ export class YoutubeOAuthService {
 
   async disconnect(userId: string, creatorProfileId: string) {
     const profile = await this.profiles.assertOwnership(userId, creatorProfileId);
+    await this.revokeAtGoogle(userId, creatorProfileId);
     const links = { ...((profile.socialLinks as Record<string, string> | null) ?? {}) };
     const stats = { ...((profile.socialStats as Record<string, unknown> | null) ?? {}) };
     delete links.youtube;
     delete stats.youtube;
 
     await this.prisma.$transaction([
+      // Disconnecting also destroys both stored tokens — a disconnected
+      // account has no business leaving a usable credential in the database.
       this.prisma.youtubeConnection.updateMany({
         where: { userId, creatorProfileId },
-        data: { isConnected: false },
+        data: { isConnected: false, encryptedAccessToken: "", encryptedRefreshToken: null },
       }),
       this.prisma.creatorProfile.update({
         where: { id: creatorProfileId },
@@ -280,9 +319,39 @@ export class YoutubeOAuthService {
     return { platform: "youtube", status: "disconnected" };
   }
 
-  private async exchangeCode(code: string) {
+  /** Finds the attempt this `state` belongs to and spends it. It must have been
+   * started by this account for this profile, be unspent and unexpired. Marked
+   * spent before anything is exchanged, so a replay never gets a second go. */
+  private async spendTransaction(userId: string, creatorProfileId: string, state: string): Promise<string> {
+    const invalid = new BadRequestException({
+      code: "YOUTUBE_STATE_INVALID",
+      message: "This YouTube connection attempt has expired or is not valid. Start again.",
+    });
+    if (!state?.trim()) throw invalid;
+    const tx = await this.prisma.youtubeOAuthTransaction.findUnique({
+      where: { stateHash: hashOAuthState(state.trim()) },
+    });
+    if (
+      !tx ||
+      tx.userId !== userId ||
+      tx.creatorProfileId !== creatorProfileId ||
+      tx.consumedAt ||
+      tx.expiresAt < new Date()
+    ) {
+      throw invalid;
+    }
+    const spent = await this.prisma.youtubeOAuthTransaction.updateMany({
+      where: { id: tx.id, consumedAt: null },
+      data: { consumedAt: new Date() },
+    });
+    if (spent.count !== 1) throw invalid;
+    return tx.codeVerifier;
+  }
+
+  private async exchangeCode(code: string, codeVerifier: string) {
     const form = new URLSearchParams({
       code,
+      code_verifier: codeVerifier,
       client_id: this.googleClientId,
       client_secret: this.googleClientSecret,
       redirect_uri: this.youtubeRedirectUri,
@@ -650,15 +719,53 @@ export class YoutubeOAuthService {
     }
   }
 
+  /** Tells Google to cancel the grant, so the token we are about to forget is
+   * also dead on their side. Best effort: failing to reach Google must not stop
+   * the creator disconnecting. */
+  private async revokeAtGoogle(userId: string, creatorProfileId: string): Promise<void> {
+    try {
+      const conn = await this.prisma.youtubeConnection.findFirst({
+        where: { userId, creatorProfileId },
+        select: { encryptedRefreshToken: true, encryptedAccessToken: true },
+      });
+      const stored = conn?.encryptedRefreshToken || conn?.encryptedAccessToken;
+      if (!stored) return;
+      await fetch("https://oauth2.googleapis.com/revoke", {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({ token: this.decrypt(stored) }).toString(),
+        signal: AbortSignal.timeout(10_000),
+      });
+    } catch {
+      // ignored on purpose, see above
+    }
+  }
+
   private encrypt(value: string): string {
     const iv = randomBytes(12);
-    const cipher = createCipheriv("aes-256-gcm", this.encryptionKey, iv);
+    const cipher = createCipheriv("aes-256-gcm", this.tokenKeys.primary, iv);
     const encrypted = Buffer.concat([cipher.update(value, "utf8"), cipher.final()]);
     const tag = cipher.getAuthTag();
     return `${iv.toString("base64url")}.${tag.toString("base64url")}.${encrypted.toString("base64url")}`;
   }
 
+  /** Reads with the dedicated key; falls back to the old login-secret-derived
+   * key only for tokens saved before the dedicated key was required. */
   private decrypt(value: string): string {
+    const keys = this.tokenKeys;
+    try {
+      return this.decryptWithKey(keys.primary, value);
+    } catch (primaryError) {
+      if (!keys.legacy) throw primaryError;
+      try {
+        return this.decryptWithKey(keys.legacy, value);
+      } catch {
+        throw primaryError;
+      }
+    }
+  }
+
+  private decryptWithKey(key: Buffer, value: string): string {
     const [ivRaw, tagRaw, encryptedRaw] = value.split(".");
     if (!ivRaw || !tagRaw || !encryptedRaw) {
       throw new BadRequestException({
@@ -668,7 +775,7 @@ export class YoutubeOAuthService {
     }
     const decipher = createDecipheriv(
       "aes-256-gcm",
-      this.encryptionKey,
+      key,
       Buffer.from(ivRaw, "base64url"),
       // Only the full 16-byte tag is accepted; a shorter one is easier to forge.
       { authTagLength: 16 },
@@ -696,12 +803,10 @@ export class YoutubeOAuthService {
     return this.config.get("YOUTUBE_OAUTH_SCOPES", { infer: true });
   }
 
-  private get encryptionKey(): Buffer {
-    return createHash("sha256")
-      .update(
-        this.config.get("YOUTUBE_TOKEN_ENCRYPTION_KEY", { infer: true }) ??
-          this.config.get("JWT_SECRET", { infer: true }),
-      )
-      .digest();
+  private get tokenKeys(): PayoutKeys {
+    return resolvePayoutKeys(
+      this.config.get("YOUTUBE_TOKEN_ENCRYPTION_KEY", { infer: true }),
+      this.config.get("JWT_SECRET", { infer: true }),
+    );
   }
 }

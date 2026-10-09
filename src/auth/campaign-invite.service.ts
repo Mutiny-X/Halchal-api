@@ -131,6 +131,7 @@ export class CampaignInviteService {
       where: { email },
       include: { brandProfile: true },
     });
+    const isExistingAccount = user !== null;
 
     if (!user) {
       if (!dto.password) {
@@ -172,6 +173,14 @@ export class CampaignInviteService {
         code: "NOT_FOUND",
         message: "Brand profile not found for this account",
       });
+    }
+
+    // An invite link says someone emailed this address — not that the person
+    // holding the link owns the account that already exists at it. Without
+    // this check the link alone would sign in as that account.
+    if (isExistingAccount) {
+      if (!dto.password) return { needsLogin: true as const };
+      await this.auth.authenticatePassword(email, dto.password, [UserRole.brand]);
     }
 
     const brandProfileId = user.brandProfile!.id;

@@ -3,6 +3,7 @@ import {
   Body,
   Controller,
   Get,
+  HttpCode,
   Param,
   Post,
   Query,
@@ -19,7 +20,9 @@ import type { Response } from "express";
 import { memoryStorage } from "multer";
 
 import { AdminSectionRoute } from "../admin-roles/decorators/admin-section.decorator";
+import { RequireMoneyAccess } from "../admin-roles/decorators/money-access.decorator";
 import { AdminSectionGuard } from "../admin-roles/guards/admin-section.guard";
+import { MoneyAccessGuard } from "../admin-roles/guards/money-access.guard";
 import { JwtAuthGuard } from "../auth/guards/jwt-auth.guard";
 import type { AuthJwtPayload } from "../auth/auth.types";
 import { CurrentUser } from "../common/decorators/current-user.decorator";
@@ -50,11 +53,13 @@ class ListWithdrawalsQuery {
 }
 
 /** Admin tooling for the manual payout process. Every route here needs the
- * "payouts" section: View to see the queue, Manage to download sheets (which
- * contain full bank details) and record results. */
+ * "payouts" section: View to see the queue (masked account numbers only),
+ * Manage to download sheets (which contain full bank details) and record
+ * results. The routes that expose full bank details or record a payment also
+ * need the role's canSeeMoney flag — Manage on the section alone isn't enough. */
 @ApiTags("admin-withdrawals")
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard, RolesGuard, AdminSectionGuard)
+@UseGuards(JwtAuthGuard, RolesGuard, AdminSectionGuard, MoneyAccessGuard)
 @Roles(UserRole.admin)
 @AdminSectionRoute("payouts")
 @Controller("admin/withdrawals")
@@ -80,6 +85,8 @@ export class AdminWithdrawalsController {
   // A POST because exporting changes state: the rows move to "processing".
   // The download is a one-time hand-off; use the batch route to fetch it again.
   @Post("export")
+  @HttpCode(200)
+  @RequireMoneyAccess()
   async exportPending(@CurrentUser() user: AuthJwtPayload, @Res() res: Response) {
     const file = await this.fulfilment.exportPending(user.sub);
     res.set({
@@ -94,6 +101,7 @@ export class AdminWithdrawalsController {
   }
 
   @Get("batches/:id/download")
+  @RequireMoneyAccess()
   async downloadBatch(
     @CurrentUser() user: AuthJwtPayload,
     @Param("id") batchId: string,
@@ -110,6 +118,7 @@ export class AdminWithdrawalsController {
   }
 
   @Post("import")
+  @RequireMoneyAccess()
   @UseInterceptors(
     FileInterceptor("file", {
       storage: memoryStorage(),
@@ -124,11 +133,13 @@ export class AdminWithdrawalsController {
   }
 
   @Post(":id/paid")
+  @RequireMoneyAccess()
   markPaid(@CurrentUser() user: AuthJwtPayload, @Param("id") id: string, @Body() dto: MarkPaidDto) {
     return this.fulfilment.markPaid(id, dto.utr, user.sub);
   }
 
   @Post(":id/failed")
+  @RequireMoneyAccess()
   markFailed(@CurrentUser() user: AuthJwtPayload, @Param("id") id: string, @Body() dto: MarkFailedDto) {
     return this.fulfilment.markFailed(id, dto.reason, user.sub);
   }

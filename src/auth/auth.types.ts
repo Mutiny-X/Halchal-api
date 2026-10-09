@@ -18,6 +18,12 @@ export interface AuthTokens {
  * staff) runs every campaign for them. Brand users still exist as the
  * owners of brand profiles, but can't sign up, sign in or use a session.
  */
+/** Who issued an access token and who it is for. Verified on every request so a
+ * token minted by some other service that happens to share the secret (or for
+ * a different audience) is refused. */
+export const JWT_ISSUER = "halchal-api";
+export const JWT_AUDIENCE = "halchal-app";
+
 export const BRAND_ACCESS_CLOSED = {
   code: "BRAND_ACCESS_CLOSED",
   message: "Brand accounts can't sign in. The Halchal team manages your campaigns — contact us for anything you need.",

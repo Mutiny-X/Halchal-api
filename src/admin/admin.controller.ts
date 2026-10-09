@@ -34,6 +34,8 @@ import { InstagramAccountInsightsService } from "../creator-profiles/instagram-a
 import { ObjectStorageService } from "../storage/object-storage.service";
 import { AdminSectionRoute } from "../admin-roles/decorators/admin-section.decorator";
 import { AdminSectionGuard } from "../admin-roles/guards/admin-section.guard";
+import { MoneyAccessGuard } from "../admin-roles/guards/money-access.guard";
+import { RequireMoneyAccess } from "../admin-roles/decorators/money-access.decorator";
 import { SuperAdminOnlyGuard } from "../admin-roles/guards/super-admin-only.guard";
 import {
   AssignAdminRoleDto,
@@ -167,7 +169,7 @@ class SetPoolOverflowDto {
 
 @ApiTags("admin")
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard, RolesGuard, AdminSectionGuard)
+@UseGuards(JwtAuthGuard, RolesGuard, AdminSectionGuard, MoneyAccessGuard)
 @UseInterceptors(AdminAuditInterceptor)
 @Roles(UserRole.admin)
 @Controller("admin")
@@ -314,8 +316,16 @@ export class AdminController {
 
   @Get("creators/:id")
   @AdminSectionRoute("clippers")
-  getCreator(@Param("id") id: string) {
-    return this.admin.getCreatorDetail(id);
+  async getCreator(@Param("id") id: string) {
+    const detail = await this.admin.getCreatorDetail(id);
+    // Identity documents are kept private: show a link that works for ten
+    // minutes, not a permanent one.
+    return {
+      ...detail,
+      kycDocumentUrl: await this.storage.resolveDocumentUrl(detail.kycDocumentUrl),
+      pan: { ...detail.pan, documentUrl: await this.storage.resolveDocumentUrl(detail.pan.documentUrl) },
+      aadhaar: { ...detail.aadhaar, documentUrl: await this.storage.resolveDocumentUrl(detail.aadhaar.documentUrl) },
+    };
   }
 
   @Post("creators/:id/suspend")
@@ -365,6 +375,7 @@ export class AdminController {
 
   @Get("payout-methods/:id/reveal")
   @AdminSectionRoute("clippers")
+  @RequireMoneyAccess()
   revealPayoutMethodAccountNumber(@CurrentUser() user: AuthJwtPayload, @Param("id") id: string) {
     return this.admin.revealPayoutMethodAccountNumber(id, user.sub);
   }
@@ -553,12 +564,14 @@ export class AdminController {
 
   @Post("campaigns/:id/payouts/all")
   @AdminSectionRoute("campaigns")
+  @RequireMoneyAccess()
   payoutAllCreators(@Param("id") campaignId: string) {
     return this.admin.payoutCampaign(campaignId);
   }
 
   @Post("campaigns/:id/payouts/creator/:creatorId")
   @AdminSectionRoute("campaigns")
+  @RequireMoneyAccess()
   payoutOneCreator(
     @Param("id") campaignId: string,
     @Param("creatorId") creatorId: string,

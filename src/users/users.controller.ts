@@ -24,7 +24,7 @@ import { JwtAuthGuard } from "../auth/guards/jwt-auth.guard";
 import type { AuthJwtPayload } from "../auth/auth.types";
 import { PushNotificationService } from "../notifications/push-notification.service";
 import { BufferedUploadGuard } from "../direct-upload/buffered-upload.guard";
-import { ObjectStorageService } from "../storage/object-storage.service";
+import { isPrivateDocumentRef, ObjectStorageService } from "../storage/object-storage.service";
 import { UsersService } from "./users.service";
 import { UserMeDto } from "./dto/user-me.dto";
 import { UpdateBrandProfileDto } from "./dto/update-brand-profile.dto";
@@ -156,9 +156,10 @@ export class UsersController {
       originalname: file.originalname,
       mimetype: file.mimetype,
     });
-    const url = result.url.startsWith("http")
-      ? result.url
-      : `${req.protocol}://${req.get("host")}${result.url}`;
+    const url =
+      result.url.startsWith("http") || isPrivateDocumentRef(result.url)
+        ? result.url
+        : `${req.protocol}://${req.get("host")}${result.url}`;
     return { url };
   }
 
@@ -179,9 +180,10 @@ export class UsersController {
       originalname: file.originalname,
       mimetype: file.mimetype,
     });
-    const url = result.url.startsWith("http")
-      ? result.url
-      : `${req.protocol}://${req.get("host")}${result.url}`;
+    const url =
+      result.url.startsWith("http") || isPrivateDocumentRef(result.url)
+        ? result.url
+        : `${req.protocol}://${req.get("host")}${result.url}`;
     await this.users.updateProfile(user.sub, { avatarUrl: url });
     return { url };
   }
@@ -199,14 +201,15 @@ export class UsersController {
     @UploadedFile() file: Express.Multer.File,
     @Body("documentType") documentType?: string,
   ) {
-    const result = await this.storage.saveUploadedFile("kyc-documents", {
+    const result = await this.storage.saveIdentityDocument("kyc-documents", {
       buffer: file.buffer,
       originalname: file.originalname,
       mimetype: file.mimetype,
     });
-    const url = result.url.startsWith("http")
-      ? result.url
-      : `${req.protocol}://${req.get("host")}${result.url}`;
+    const url =
+      result.url.startsWith("http") || isPrivateDocumentRef(result.url)
+        ? result.url
+        : `${req.protocol}://${req.get("host")}${result.url}`;
     return this.users.submitKyc(user.sub, url, documentType ?? "id_proof");
   }
 
@@ -225,14 +228,15 @@ export class UsersController {
     if (!file?.buffer) {
       throw new BadRequestException({ code: "VALIDATION_ERROR", message: "File is required" });
     }
-    const result = await this.storage.saveUploadedFile("pan-documents", {
+    const result = await this.storage.saveIdentityDocument("pan-documents", {
       buffer: file.buffer,
       originalname: file.originalname,
       mimetype: file.mimetype,
     });
-    const url = result.url.startsWith("http")
-      ? result.url
-      : `${req.protocol}://${req.get("host")}${result.url}`;
+    const url =
+      result.url.startsWith("http") || isPrivateDocumentRef(result.url)
+        ? result.url
+        : `${req.protocol}://${req.get("host")}${result.url}`;
     return this.users.submitPan(user.sub, url, file.buffer, file.mimetype);
   }
 

@@ -11,6 +11,7 @@ import { CampaignInviteService } from "./campaign-invite.service";
 import { AuthController } from "./auth.controller";
 import { AuthService } from "./auth.service";
 import { FixedOtpService } from "./fixed-otp.service";
+import { JWT_AUDIENCE, JWT_ISSUER } from "./auth.types";
 import { JwtStrategy } from "./jwt.strategy";
 import { OtpService } from "./otp.service";
 
@@ -21,8 +22,8 @@ import { OtpService } from "./otp.service";
       inject: [ConfigService],
       useFactory: (config: ConfigService<Env, true>) => ({
         secret: config.get("JWT_SECRET", { infer: true }),
-        signOptions: { algorithm: "HS256" },
-        verifyOptions: { algorithms: ["HS256"] },
+        signOptions: { algorithm: "HS256", issuer: JWT_ISSUER, audience: JWT_AUDIENCE },
+        verifyOptions: { algorithms: ["HS256"], issuer: JWT_ISSUER, audience: JWT_AUDIENCE },
       }),
     }),
     NotificationsModule,
