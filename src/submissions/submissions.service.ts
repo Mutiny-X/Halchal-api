@@ -372,12 +372,15 @@ export class SubmissionsService {
     ]);
 
     const links = (user?.socialLinks as Record<string, string> | null) ?? {};
+    // The dashboard's Withdraw entry reads the same server-side rules as the wallet.
+    const withdrawal = await this.walletService.getWithdrawalRules(userId, wallet?.lifetimePaise ?? 0);
 
     return {
       wallet: {
         availablePaise: wallet?.availablePaise ?? 0,
         pendingPaise,
         lifetimePaise: wallet?.lifetimePaise ?? 0,
+        withdrawal,
       },
       clipsUnderReview: reviewCount,
       socialLinks: {

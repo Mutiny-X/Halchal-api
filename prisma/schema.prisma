@@ -138,6 +138,10 @@ enum TransactionType {
   fee_debit
 
   adjustment
+
+  /// A failed withdrawal returned to the wallet. Restores availablePaise only —
+  /// never lifetimePaise, which counts earnings, not balance movements.
+  withdrawal_refund
 }
 
 enum WithdrawalStatus {
@@ -188,6 +192,8 @@ enum AdminSection {
   notifications
 
   team
+
+  payouts
 }
 
 enum AdminPermissionLevel {
@@ -1185,12 +1191,53 @@ model Withdrawal {
 
   createdAt DateTime @default(now()) @map("created_at")
 
+  /// When the withdrawal reached a final state (paid or failed).
   processedAt DateTime? @map("processed_at")
 
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  /// Payment details frozen at request time — {type, accountHolderName,
+  /// accountNumber (still AES-GCM ciphertext), ifscCode, bankName, panNumber,
+  /// accountMasked, label}. An open withdrawal pays out to exactly what the
+  /// creator confirmed, even if they edit their payout method afterwards.
+  payoutSnapshot Json? @map("payout_snapshot")
+
+  /// Set when the withdrawal is included in an exported payment sheet.
+  batchId    String?   @map("batch_id")
+  exportedAt DateTime? @map("exported_at")
+
+  /// Bank reference the accounts team recorded once paid.
+  utr String?
+
+  /// Why a failed withdrawal wasn't paid (the amount is refunded to the wallet).
+  failureReason String? @map("failure_reason")
+
+  /// The admin who marked this paid or failed.
+  resolvedByUserId String? @map("resolved_by_user_id")
+
+  user  User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  batch WithdrawalBatch? @relation(fields: [batchId], references: [id], onDelete: SetNull)
 
   @@index([userId, status])
+  @@index([status, createdAt])
+  @@index([batchId])
   @@map("withdrawals")
+}
+
+/// One exported payment sheet. Lets an admin re-download the exact same set of
+/// rows if the file is lost, and gives each download an audit trail.
+model WithdrawalBatch {
+  id String @id @default(cuid())
+
+  createdByUserId String @map("created_by_user_id")
+
+  rowCount Int @map("row_count")
+
+  totalNetPaise Int @map("total_net_paise")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  withdrawals Withdrawal[]
+
+  @@map("withdrawal_batches")
 }
 
 model SupportTicket {

@@ -1,12 +1,58 @@
 import { Injectable } from "@nestjs/common";
-import { FormatDeliverableStatus, Prisma } from "@prisma/client";
+import { ConfigService } from "@nestjs/config";
+import { FormatDeliverableStatus, Prisma, WithdrawalStatus } from "@prisma/client";
 
 import { computeEstimatedPaise } from "../common/earnings";
+import {
+  WITHDRAWAL_DENOMINATIONS_PAISE,
+  WITHDRAWAL_EXPECTED_DAYS,
+  WITHDRAWAL_LIFETIME_GATE_PAISE,
+  isWithdrawalUnlocked,
+  startOfIstDay,
+  startOfNextIstDay,
+} from "../common/withdrawal-rules";
+import type { Env } from "../config/env";
 import { PrismaService } from "../prisma/prisma.service";
 
 @Injectable()
 export class WalletService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly config: ConfigService<Env, true>,
+  ) {}
+
+  /** The withdrawal rules plus this creator's current standing against them —
+   * the single source the apps read, so nothing is hard-coded client-side. */
+  async getWithdrawalRules(userId: string, lifetimePaise: number) {
+    const now = new Date();
+    const [openCount, todayCount] = await Promise.all([
+      this.prisma.withdrawal.count({
+        where: {
+          userId,
+          status: { in: [WithdrawalStatus.pending, WithdrawalStatus.processing] },
+        },
+      }),
+      this.prisma.withdrawal.count({
+        where: {
+          userId,
+          createdAt: { gte: startOfIstDay(now) },
+          status: { not: WithdrawalStatus.failed },
+        },
+      }),
+    ]);
+    const unlocked = isWithdrawalUnlocked(lifetimePaise);
+    return {
+      unlocked,
+      lifetimeGatePaise: WITHDRAWAL_LIFETIME_GATE_PAISE,
+      remainingToUnlockPaise: unlocked ? 0 : WITHDRAWAL_LIFETIME_GATE_PAISE - lifetimePaise,
+      denominationsPaise: [...WITHDRAWAL_DENOMINATIONS_PAISE],
+      feeBps: this.config.get("WITHDRAWAL_FEE_BPS", { infer: true }),
+      hasOpenWithdrawal: openCount > 0,
+      requestedToday: todayCount > 0,
+      nextRequestAt: todayCount > 0 ? startOfNextIstDay(now).toISOString() : null,
+      expectedDays: WITHDRAWAL_EXPECTED_DAYS,
+    };
+  }
 
   async getOrCreateWallet(userId: string) {
     let wallet = await this.prisma.wallet.findUnique({ where: { userId } });
@@ -62,11 +108,13 @@ export class WalletService {
       this.computePendingPaise(userId, creatorProfileId),
       this.countClipsUnderReview(userId, creatorProfileId),
     ]);
+    const withdrawal = await this.getWithdrawalRules(userId, wallet.lifetimePaise);
     return {
       availablePaise: wallet.availablePaise,
       pendingPaise,
       lifetimePaise: wallet.lifetimePaise,
       clipsUnderReview,
+      withdrawal,
     };
   }
 
