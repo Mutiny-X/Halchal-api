@@ -59,6 +59,7 @@ export const TransactionTypeSchema = z.enum([
   "withdrawal_debit",
   "fee_debit",
   "adjustment",
+  "withdrawal_refund",
 ]);
 export type TransactionType = z.infer<typeof TransactionTypeSchema>;
 
@@ -114,7 +115,7 @@ export function computeEarningsPaise(
 
 export function computeWithdrawalFeePaise(
   amountPaise: number,
-  feeBps: number = 150,
+  feeBps: number = 500,
 ): number {
   return Math.floor((amountPaise * feeBps) / 10000);
 }

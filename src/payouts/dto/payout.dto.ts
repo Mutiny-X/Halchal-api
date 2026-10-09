@@ -8,7 +8,35 @@ import {
   Min,
   MinLength,
   ValidateIf,
+  ValidationArguments,
+  ValidatorConstraint,
+  ValidatorConstraintInterface,
+  Validate,
 } from "class-validator";
+
+const BANK_ACCOUNT_PATTERN = /^\d{6,20}$/;
+const UPI_ID_PATTERN = /^[a-zA-Z0-9._-]{2,256}@[a-zA-Z0-9]{2,64}$/;
+
+/** A bank account number is digits only; a UPI ID must look like name@bank.
+ * Both used to be accepted as any 4+ character string. */
+@ValidatorConstraint({ name: "payoutAccountForType", async: false })
+class PayoutAccountForTypeConstraint implements ValidatorConstraintInterface {
+  validate(value: unknown, args: ValidationArguments): boolean {
+    if (typeof value !== "string") return false;
+    const type = (args.object as { type?: string }).type;
+    const account = value.trim();
+    if (type === "upi") return UPI_ID_PATTERN.test(account);
+    if (type === "bank") return BANK_ACCOUNT_PATTERN.test(account);
+    return true; // unknown type is rejected by the service
+  }
+
+  defaultMessage(args: ValidationArguments): string {
+    const type = (args.object as { type?: string }).type;
+    return type === "upi"
+      ? "account must be a valid UPI ID (e.g. name@bank)"
+      : "account must be a bank account number (6–20 digits)";
+  }
+}
 
 export class CreatePayoutMethodDto {
   @ApiProperty({ enum: ["bank", "upi"] })
@@ -31,6 +59,7 @@ export class CreatePayoutMethodDto {
   @IsString()
   @MinLength(4)
   @MaxLength(64)
+  @Validate(PayoutAccountForTypeConstraint)
   account!: string;
 
   @ApiPropertyOptional({ example: "HDFC0001234", description: "Required for bank accounts, ignored for UPI" })
@@ -94,7 +123,10 @@ export class UpdatePayoutMethodDto {
 }
 
 export class CreateWithdrawalDto {
-  @ApiProperty({ description: "Amount in paise" })
+  @ApiProperty({
+    description:
+      "Amount in paise — must be one of the fixed denominations returned by GET /wallet (withdrawal.denominationsPaise)",
+  })
   @IsInt()
   @Min(100)
   amountPaise!: number;
@@ -157,9 +189,24 @@ export class WithdrawalDto {
   @ApiProperty()
   netPaise!: number;
 
-  @ApiProperty()
+  @ApiProperty({ enum: ["pending", "processing", "completed", "failed"] })
   status!: string;
 
   @ApiProperty()
   createdAt!: string;
+
+  @ApiProperty({ nullable: true })
+  processedAt!: string | null;
+
+  @ApiProperty({ nullable: true, description: "Bank reference, once paid" })
+  utr!: string | null;
+
+  @ApiProperty({ nullable: true, description: "Why a failed withdrawal wasn't paid" })
+  failureReason!: string | null;
+
+  @ApiProperty({ nullable: true })
+  payoutLabel!: string | null;
+
+  @ApiProperty({ nullable: true })
+  payoutMasked!: string | null;
 }

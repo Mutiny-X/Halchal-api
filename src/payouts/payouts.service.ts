@@ -5,20 +5,43 @@ import {
   NotFoundException,
 } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
-import { WithdrawalStatus } from "@prisma/client";
-import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
-function computeWithdrawalFeePaise(
-  amountPaise: number,
-  feeBps: number,
-): number {
-  return Math.floor((amountPaise * feeBps) / 10000);
-}
+import { Prisma, WithdrawalStatus } from "@prisma/client";
 
 import { ActivityLogService } from "../activity/activity-log.service";
+import {
+  WITHDRAWAL_EXPECTED_DAYS,
+  checkWithdrawalEligibility,
+  computeWithdrawalFeePaise,
+  startOfIstDay,
+} from "../common/withdrawal-rules";
 import type { Env } from "../config/env";
 import { InAppNotificationService } from "../notifications/in-app-notification.service";
 import { PrismaService } from "../prisma/prisma.service";
 import type { CreatePayoutMethodDto, CreateWithdrawalDto, UpdatePayoutMethodDto } from "./dto/payout.dto";
+import {
+  decryptPayoutAccount,
+  derivePayoutKey,
+  encryptPayoutAccount,
+} from "./payout-account-crypto";
+
+/** Payment details frozen onto a withdrawal at request time. The account
+ * number stays AES-GCM ciphertext — it's only decrypted when an admin exports
+ * the payment sheet. */
+export type PayoutSnapshot = {
+  type: string;
+  label: string;
+  accountHolderName: string;
+  accountNumber: string;
+  accountMasked: string;
+  ifscCode: string | null;
+  bankName: string | null;
+  panNumber: string | null;
+};
+
+const OPEN_WITHDRAWAL_STATUSES: WithdrawalStatus[] = [
+  WithdrawalStatus.pending,
+  WithdrawalStatus.processing,
+];
 
 @Injectable()
 export class PayoutsService {
@@ -35,40 +58,25 @@ export class PayoutsService {
    * YouTube OAuth token encryption in creator-profiles.
    */
   private get encryptionKey(): Buffer {
-    return createHash("sha256")
-      .update(
-        this.config.get("PAYOUT_ACCOUNT_ENCRYPTION_KEY", { infer: true }) ??
-          this.config.get("JWT_SECRET", { infer: true }),
-      )
-      .digest();
+    return derivePayoutKey(
+      this.config.get("PAYOUT_ACCOUNT_ENCRYPTION_KEY", { infer: true }) ??
+        this.config.get("JWT_SECRET", { infer: true }),
+    );
   }
 
   private encryptAccount(value: string): string {
-    const iv = randomBytes(12);
-    const cipher = createCipheriv("aes-256-gcm", this.encryptionKey, iv);
-    const encrypted = Buffer.concat([cipher.update(value, "utf8"), cipher.final()]);
-    const tag = cipher.getAuthTag();
-    return `${iv.toString("base64url")}.${tag.toString("base64url")}.${encrypted.toString("base64url")}`;
+    return encryptPayoutAccount(this.encryptionKey, value);
   }
 
   private decryptAccount(value: string): string {
-    const [ivRaw, tagRaw, encryptedRaw] = value.split(".");
-    if (!ivRaw || !tagRaw || !encryptedRaw) {
+    const plain = decryptPayoutAccount(this.encryptionKey, value);
+    if (plain === null) {
       throw new BadRequestException({
         code: "PAYOUT_ACCOUNT_INVALID",
         message: "Stored account number is invalid.",
       });
     }
-    const decipher = createDecipheriv(
-      "aes-256-gcm",
-      this.encryptionKey,
-      Buffer.from(ivRaw, "base64url"),
-    );
-    decipher.setAuthTag(Buffer.from(tagRaw, "base64url"));
-    return Buffer.concat([
-      decipher.update(Buffer.from(encryptedRaw, "base64url")),
-      decipher.final(),
-    ]).toString("utf8");
+    return plain;
   }
 
   maskAccount(account: string): string {
@@ -267,21 +275,6 @@ export class PayoutsService {
   }
 
   async createWithdrawal(userId: string, dto: CreateWithdrawalDto) {
-    if (dto.idempotencyKey) {
-      const existing = await this.prisma.withdrawal.findUnique({
-        where: { idempotencyKey: dto.idempotencyKey },
-      });
-      if (existing && existing.userId === userId) {
-        return this.formatWithdrawal(existing);
-      }
-      if (existing) {
-        throw new ConflictException({
-          code: "CONFLICT",
-          message: "Idempotency key already used",
-        });
-      }
-    }
-
     const payoutMethod = await this.prisma.payoutMethod.findFirst({
       where: { id: dto.payoutMethodId, userId },
     });
@@ -296,75 +289,138 @@ export class PayoutsService {
     const feePaise = computeWithdrawalFeePaise(dto.amountPaise, feeBps);
     const netPaise = dto.amountPaise - feePaise;
 
-    if (netPaise <= 0) {
-      throw new BadRequestException({
-        code: "VALIDATION_ERROR",
-        message: "Withdrawal amount too small after fee",
+    const snapshot: PayoutSnapshot = {
+      type: payoutMethod.type,
+      label: payoutMethod.label,
+      accountHolderName: payoutMethod.accountHolderName,
+      accountNumber: payoutMethod.accountNumber,
+      accountMasked: payoutMethod.accountMasked,
+      ifscCode: payoutMethod.ifscCode,
+      bankName: payoutMethod.bankName,
+      panNumber: payoutMethod.panNumber,
+    };
+
+    const dayStart = startOfIstDay(new Date());
+
+    let result: { withdrawal: WithdrawalRow; replay: boolean };
+    try {
+      result = await this.prisma.$transaction(async (tx) => {
+        // Serialize every withdrawal attempt by this creator: the checks below
+        // (balance, one open request, one per day, idempotency) all read then
+        // write, so without the row lock two concurrent requests could both pass.
+        await tx.$queryRaw`SELECT id FROM wallets WHERE user_id = ${userId} FOR UPDATE`;
+
+        if (dto.idempotencyKey) {
+          const existing = await tx.withdrawal.findUnique({
+            where: { idempotencyKey: dto.idempotencyKey },
+          });
+          if (existing) {
+            if (existing.userId !== userId) {
+              throw new ConflictException({
+                code: "CONFLICT",
+                message: "Idempotency key already used",
+              });
+            }
+            return { withdrawal: existing, replay: true };
+          }
+        }
+
+        const wallet = await tx.wallet.findUnique({ where: { userId } });
+        const [openCount, todayCount] = await Promise.all([
+          tx.withdrawal.count({ where: { userId, status: { in: OPEN_WITHDRAWAL_STATUSES } } }),
+          tx.withdrawal.count({
+            where: { userId, createdAt: { gte: dayStart }, status: { not: WithdrawalStatus.failed } },
+          }),
+        ]);
+
+        const rejection = checkWithdrawalEligibility({
+          amountPaise: dto.amountPaise,
+          availablePaise: wallet?.availablePaise ?? 0,
+          lifetimePaise: wallet?.lifetimePaise ?? 0,
+          feeBps,
+          hasOpenWithdrawal: openCount > 0,
+          requestedToday: todayCount > 0,
+        });
+        if (rejection || !wallet) {
+          throw new BadRequestException(
+            rejection ?? { code: "WITHDRAWAL_LOCKED", message: "Withdrawals are not available yet." },
+          );
+        }
+
+        const withdrawal = await tx.withdrawal.create({
+          data: {
+            userId,
+            amountPaise: dto.amountPaise,
+            feePaise,
+            netPaise,
+            payoutMethodId: payoutMethod.id,
+            payoutSnapshot: snapshot as unknown as Prisma.InputJsonValue,
+            idempotencyKey: dto.idempotencyKey,
+            status: WithdrawalStatus.pending,
+          },
+        });
+
+        // Guarded decrement: belt and braces behind the row lock above.
+        const { count } = await tx.wallet.updateMany({
+          where: { id: wallet.id, availablePaise: { gte: dto.amountPaise } },
+          data: { availablePaise: { decrement: dto.amountPaise } },
+        });
+        if (count === 0) {
+          throw new BadRequestException({
+            code: "WITHDRAWAL_INSUFFICIENT_BALANCE",
+            message: "Insufficient available balance.",
+          });
+        }
+
+        await tx.transaction.create({
+          data: {
+            walletId: wallet.id,
+            type: "withdrawal_debit",
+            amountPaise: dto.amountPaise,
+            referenceId: withdrawal.id,
+            note: `Withdrawal requested (fee ${feePaise} paise, net ${netPaise} paise)`,
+          },
+        });
+
+        return { withdrawal, replay: false };
       });
+    } catch (err) {
+      // Two simultaneous requests with the same idempotency key: the loser
+      // trips the unique index. Hand back the winner's withdrawal.
+      if (
+        dto.idempotencyKey &&
+        err instanceof Prisma.PrismaClientKnownRequestError &&
+        err.code === "P2002"
+      ) {
+        const existing = await this.prisma.withdrawal.findUnique({
+          where: { idempotencyKey: dto.idempotencyKey },
+        });
+        if (existing && existing.userId === userId) {
+          return this.formatWithdrawal(existing);
+        }
+      }
+      throw err;
     }
 
-    const completed = await this.prisma.$transaction(async (tx) => {
-      const wallet = await tx.wallet.findUnique({ where: { userId } });
-      if (!wallet || wallet.availablePaise < dto.amountPaise) {
-        throw new BadRequestException({
-          code: "VALIDATION_ERROR",
-          message: "Insufficient available balance",
-        });
-      }
-
-      const withdrawal = await tx.withdrawal.create({
-        data: {
-          userId,
-          amountPaise: dto.amountPaise,
-          feePaise,
-          netPaise,
-          payoutMethodId: dto.payoutMethodId,
-          idempotencyKey: dto.idempotencyKey,
-          status: WithdrawalStatus.processing,
-        },
-      });
-
-      await tx.wallet.update({
-        where: { id: wallet.id },
-        data: {
-          availablePaise: { decrement: dto.amountPaise },
-        },
-      });
-
-      await tx.transaction.create({
-        data: {
-          walletId: wallet.id,
-          type: "withdrawal_debit",
-          amountPaise: dto.amountPaise,
-          referenceId: withdrawal.id,
-          note: `Withdrawal (fee ${feePaise} paise, net ${netPaise} paise)`,
-        },
-      });
-
-      return tx.withdrawal.update({
-        where: { id: withdrawal.id },
-        data: {
-          status: WithdrawalStatus.completed,
-          processedAt: new Date(),
-        },
-      });
-    });
+    if (result.replay) {
+      return this.formatWithdrawal(result.withdrawal);
+    }
 
     await this.notifications.notifyAllAdmins({
       type: "withdrawal.requested",
       title: "Withdrawal requested",
-      body: `₹${(netPaise / 100).toFixed(2)} requested`,
+      body: `₹${(netPaise / 100).toFixed(2)} to pay — add it to the next payment sheet.`,
+      link: "/admin/payouts",
     });
 
     await this.notifications.create(userId, "creator", {
-      type: "withdrawal_processed",
-      title: "Withdrawal processed",
-      body: `₹${(netPaise / 100).toFixed(2)} is on its way to your ${payoutMethod.label}.`,
+      type: "withdrawal_requested",
+      title: "Withdrawal requested",
+      body: `₹${(netPaise / 100).toFixed(2)} will be paid to your ${payoutMethod.label} within ${WITHDRAWAL_EXPECTED_DAYS} days.`,
       link: "/wallet",
-      sendWhatsapp: true,
     });
 
-    return this.formatWithdrawal(completed);
+    return this.formatWithdrawal(result.withdrawal);
   }
 
   async listWithdrawals(userId: string, limit = 20) {
@@ -376,14 +432,8 @@ export class PayoutsService {
     return { items: items.map((w) => this.formatWithdrawal(w)) };
   }
 
-  private formatWithdrawal(w: {
-    id: string;
-    amountPaise: number;
-    feePaise: number;
-    netPaise: number;
-    status: WithdrawalStatus;
-    createdAt: Date;
-  }) {
+  private formatWithdrawal(w: WithdrawalRow) {
+    const snapshot = (w.payoutSnapshot ?? null) as Partial<PayoutSnapshot> | null;
     return {
       id: w.id,
       amountPaise: w.amountPaise,
@@ -391,6 +441,25 @@ export class PayoutsService {
       netPaise: w.netPaise,
       status: w.status,
       createdAt: w.createdAt.toISOString(),
+      processedAt: w.processedAt?.toISOString() ?? null,
+      utr: w.utr ?? null,
+      failureReason: w.failureReason ?? null,
+      payoutLabel: snapshot?.label ?? null,
+      payoutMasked: snapshot?.accountMasked ?? null,
     };
   }
 }
+
+type WithdrawalRow = {
+  id: string;
+  userId: string;
+  amountPaise: number;
+  feePaise: number;
+  netPaise: number;
+  status: WithdrawalStatus;
+  createdAt: Date;
+  processedAt: Date | null;
+  utr: string | null;
+  failureReason: string | null;
+  payoutSnapshot: Prisma.JsonValue | null;
+};

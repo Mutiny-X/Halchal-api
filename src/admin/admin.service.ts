@@ -868,6 +868,8 @@ export class AdminService {
         status: w.status,
         createdAt: w.createdAt.toISOString(),
         processedAt: w.processedAt?.toISOString() ?? null,
+        utr: w.utr ?? null,
+        failureReason: w.failureReason ?? null,
       })),
       runningCampaigns,
       pastCampaigns,
