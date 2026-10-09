@@ -13,7 +13,7 @@ function makeService() {
     $transaction: vi.fn().mockResolvedValue([]),
     $queryRaw: vi.fn().mockResolvedValue([{ total: 0n }]),
   };
-  const realtime = { emitCampaignUpdated: vi.fn() };
+  const realtime = { emitCampaignUpdated: vi.fn(), disconnectUser: vi.fn().mockResolvedValue(undefined) };
   const service = new AdminService(
     prisma as never,
     {} as never, // campaigns
@@ -170,7 +170,7 @@ describe("AdminService.payoutCampaign", () => {
       creditEarningInTx: vi.fn().mockResolvedValue(undefined),
     };
     const notifications = { create: vi.fn().mockResolvedValue(undefined) };
-    const realtime = { emitDeliverablePaid: vi.fn() };
+    const realtime = { emitDeliverablePaid: vi.fn(), disconnectUser: vi.fn().mockResolvedValue(undefined) };
     const service = new AdminService(
       prisma as never,
       {} as never, // campaigns
@@ -345,11 +345,12 @@ describe("AdminService team members", () => {
     };
     const email = { sendStaffWelcome: vi.fn().mockResolvedValue(undefined) };
     const activityLog = { log: vi.fn().mockResolvedValue(undefined) };
+    const realtime = { disconnectUser: vi.fn().mockResolvedValue(undefined) };
     const service = new AdminService(
       prisma as never, {} as never, email as never, {} as never, activityLog as never,
-      {} as never, {} as never, {} as never, {} as never, {} as never, {} as never, {} as never, {} as never,
+      {} as never, realtime as never, {} as never, {} as never, {} as never, {} as never, {} as never, {} as never,
     );
-    return { service, prisma, email };
+    return { service, prisma, email, realtime };
   }
 
   it("emails a set-password link, never the password", async () => {
@@ -366,10 +367,12 @@ describe("AdminService team members", () => {
   });
 
   it("signs a deactivated member out everywhere", async () => {
-    const { service, prisma } = setup();
+    const { service, prisma, realtime } = setup();
     prisma.user.findUnique.mockResolvedValue({ id: "s1", role: "staff", isActive: true });
     await service.deactivateStaff("s1");
     expect(prisma.refreshToken.updateMany).toHaveBeenCalledWith({ where: { userId: "s1", revokedAt: null }, data: { revokedAt: expect.any(Date) } });
+    // …including a tab that is already open and listening for live updates.
+    expect(realtime.disconnectUser).toHaveBeenCalledWith("s1");
   });
 
   it("keeps a removed member's record (and activity log) instead of deleting it", async () => {

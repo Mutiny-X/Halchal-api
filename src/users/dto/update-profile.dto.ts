@@ -1,5 +1,8 @@
 import { ApiPropertyOptional } from "@nestjs/swagger";
-import { IsObject, IsOptional, IsString, MaxLength, MinLength } from "class-validator";
+import { IsObject, IsOptional, IsString, MaxLength } from "class-validator";
+
+import { IsAcceptablePassword, PASSWORD_MIN_LENGTH } from "../../auth/password-policy";
+import { IsOwnAvatarUrl, IsSocialLinks } from "./profile-validators";
 
 export class UpdateProfileDto {
   @ApiPropertyOptional()
@@ -22,6 +25,7 @@ export class UpdateProfileDto {
   @IsOptional()
   @IsString()
   @MaxLength(500)
+  @IsOwnAvatarUrl()
   avatarUrl?: string;
 
   @ApiPropertyOptional({
@@ -29,17 +33,18 @@ export class UpdateProfileDto {
   })
   @IsOptional()
   @IsObject()
+  @IsSocialLinks()
   socialLinks?: Record<string, string>;
 }
 
 export class ChangePasswordDto {
   @ApiPropertyOptional()
   @IsString()
+  @MaxLength(128)
   currentPassword!: string;
 
-  @ApiPropertyOptional({ minLength: 8 })
+  @ApiPropertyOptional({ minLength: PASSWORD_MIN_LENGTH })
   @IsString()
-  @MinLength(8)
-  @MaxLength(128)
+  @IsAcceptablePassword()
   newPassword!: string;
 }

@@ -14,6 +14,7 @@ export const ALL_ADMIN_SECTIONS: AdminSection[] = [
   "faqs",
   "notifications",
   "team",
+  "payouts",
 ];
 
 export type EffectivePermissions = {

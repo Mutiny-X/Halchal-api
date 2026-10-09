@@ -33,6 +33,7 @@ exports.TransactionTypeSchema = zod_1.z.enum([
     "withdrawal_debit",
     "fee_debit",
     "adjustment",
+    "withdrawal_refund",
 ]);
 exports.WithdrawalStatusSchema = zod_1.z.enum([
     "pending",
@@ -70,7 +71,7 @@ exports.CpvRateSchema = zod_1.z.object({
 function computeEarningsPaise(eligibleViews, ratePer1kPaise) {
     return Math.floor((eligibleViews / 1000) * ratePer1kPaise);
 }
-function computeWithdrawalFeePaise(amountPaise, feeBps = 150) {
+function computeWithdrawalFeePaise(amountPaise, feeBps = 500) {
     return Math.floor((amountPaise * feeBps) / 10000);
 }
 //# sourceMappingURL=index.js.map

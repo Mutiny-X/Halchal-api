@@ -20,7 +20,8 @@ import { CampaignAccessService } from "../access/campaign-access.service";
 @WebSocketGateway({
   namespace: "/realtime",
   cors: {
-    origin: process.env.CORS_ORIGINS?.split(",").map((o) => o.trim()) ?? true,
+    // Never "any website" — with nothing configured it is the local portal.
+    origin: (process.env.CORS_ORIGINS ?? "http://localhost:3000").split(",").map((o) => o.trim()).filter(Boolean),
     credentials: true,
   },
 })
@@ -53,7 +54,15 @@ export class RealtimeGateway
 
       const payload = await this.jwt.verifyAsync<AuthJwtPayload>(token, {
         secret: this.config.get("JWT_SECRET", { infer: true }),
+        algorithms: ["HS256"],
       });
+
+      // A valid token isn't enough: someone deactivated, removed or deleted
+      // since it was issued gets no live updates either.
+      if ((await this.campaignAccess.isAccountActive(payload.sub, payload.role)) === false) {
+        client.disconnect();
+        return;
+      }
 
       // Brands don't sign in any more — no live updates for an old session.
       if (payload.role === UserRole.brand) {
@@ -132,6 +141,17 @@ export class RealtimeGateway
     if (body.campaignId) {
       await client.leave(`campaign:${body.campaignId}`);
     }
+  }
+
+  /** Closes every live-update connection a user has open — called when an
+   * account is deactivated or removed, so an already-open tab stops
+   * receiving events instead of carrying on until it is closed. */
+  async disconnectUser(userId: string): Promise<number> {
+    if (!this.server) return 0;
+    const sockets = await this.server.fetchSockets();
+    const mine = sockets.filter((s) => s.data.userId === userId);
+    for (const socket of mine) socket.disconnect(true);
+    return mine.length;
   }
 
   emitToAdmin(event: string, payload: unknown): void {

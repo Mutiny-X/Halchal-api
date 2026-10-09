@@ -37,6 +37,8 @@ function makeConfig(flags: Record<string, boolean> = {}) {
   };
 }
 
+// An uploaded draft is a file on OUR storage — the host is checked.
+process.env.S3_PUBLIC_BASE_URL = "https://cdn.example.com";
 const uploadedDraftUrl = "https://cdn.example.com/creator-drafts/clip.mp4";
 
 function baseSource(overrides: Partial<Record<string, unknown>> = {}) {

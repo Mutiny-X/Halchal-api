@@ -18,6 +18,7 @@ import { Throttle } from "@nestjs/throttler";
 import { IsIn, IsString } from "class-validator";
 import { memoryStorage } from "multer";
 
+import { ActivityLogService } from "../activity/activity-log.service";
 import { CurrentUser } from "../common/decorators/current-user.decorator";
 import { JwtAuthGuard } from "../auth/guards/jwt-auth.guard";
 import type { AuthJwtPayload } from "../auth/auth.types";
@@ -51,6 +52,7 @@ export class UsersController {
     private readonly users: UsersService,
     private readonly storage: ObjectStorageService,
     private readonly push: PushNotificationService,
+    private readonly activityLog: ActivityLogService,
   ) {}
 
   @Get("me")
@@ -68,8 +70,10 @@ export class UsersController {
   }
 
   @Delete("me")
-  deleteMe(@CurrentUser() user: AuthJwtPayload) {
-    return this.users.deleteMe(user.sub);
+  async deleteMe(@CurrentUser() user: AuthJwtPayload) {
+    const result = await this.users.deleteMe(user.sub);
+    await this.activityLog.log(user.sub, "account.deleted", { targetType: "User", targetId: user.sub });
+    return result;
   }
 
   @Delete("me/social-stats/:platform")
@@ -118,11 +122,13 @@ export class UsersController {
 
   @Post("me/change-password")
   @Throttle({ default: { limit: 5, ttl: 60_000 } })
-  changePassword(
+  async changePassword(
     @CurrentUser() user: AuthJwtPayload,
     @Body() body: ChangePasswordDto,
   ) {
-    return this.users.changePassword(user.sub, body.currentPassword, body.newPassword);
+    const result = await this.users.changePassword(user.sub, body.currentPassword, body.newPassword);
+    await this.activityLog.log(user.sub, "auth.password_changed", { targetType: "User", targetId: user.sub });
+    return result;
   }
 
   @Patch("me/brand-profile")
@@ -239,21 +245,15 @@ export class UsersController {
   )
   async submitAadhaar(
     @CurrentUser() user: AuthJwtPayload,
-    @Req() req: import("express").Request,
     @UploadedFile() file: Express.Multer.File,
   ) {
     if (!file?.buffer) {
       throw new BadRequestException({ code: "VALIDATION_ERROR", message: "File is required" });
     }
-    const result = await this.storage.saveUploadedFile("aadhaar-documents", {
-      buffer: file.buffer,
-      originalname: file.originalname,
-      mimetype: file.mimetype,
-    });
-    const url = result.url.startsWith("http")
-      ? result.url
-      : `${req.protocol}://${req.get("host")}${result.url}`;
-    return this.users.submitAadhaar(user.sub, url, file.buffer, file.mimetype);
+    // The Aadhaar image is checked straight from the upload and never
+    // stored: only the verified name and the masked last four digits are
+    // kept (see User.aadhaarMaskedNumber).
+    return this.users.submitAadhaar(user.sub, null, file.buffer, file.mimetype);
   }
 
   @Post("me/device-token")
@@ -266,8 +266,11 @@ export class UsersController {
   }
 
   @Delete("me/device-token")
-  async unregisterDeviceToken(@Body() body: UnregisterDeviceTokenDto) {
-    await this.push.unregisterToken(body.token);
+  async unregisterDeviceToken(
+    @CurrentUser() user: AuthJwtPayload,
+    @Body() body: UnregisterDeviceTokenDto,
+  ) {
+    await this.push.unregisterToken(user.sub, body.token);
     return { unregistered: true };
   }
 }

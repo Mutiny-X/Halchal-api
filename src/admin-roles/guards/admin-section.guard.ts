@@ -1,4 +1,4 @@
-import { CanActivate, ExecutionContext, ForbiddenException, Injectable } from "@nestjs/common";
+import { CanActivate, ExecutionContext, ForbiddenException, Injectable, UnauthorizedException } from "@nestjs/common";
 import { Reflector } from "@nestjs/core";
 import type { AdminSection } from "@prisma/client";
 
@@ -28,7 +28,11 @@ export class AdminSectionGuard implements CanActivate {
 
     const request = context.switchToHttp().getRequest<{ user: AuthJwtPayload; method: string }>();
     const { user, method } = request;
-    if (!user) return true; // JwtAuthGuard already handles unauthenticated requests
+    // JwtAuthGuard runs first and attaches the user. If this guard is ever
+    // used without it, refuse rather than wave the request through.
+    if (!user) {
+      throw new UnauthorizedException({ code: "UNAUTHORIZED", message: "Sign in required" });
+    }
 
     const permissions = await this.adminRoles.getEffectivePermissions(user.sub);
     if (permissions.isSuperAdmin) return true;

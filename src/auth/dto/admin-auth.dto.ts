@@ -1,5 +1,5 @@
 import { ApiProperty } from "@nestjs/swagger";
-import { IsEmail, IsString, MinLength } from "class-validator";
+import { IsEmail, IsString, MaxLength, MinLength } from "class-validator";
 
 export class AdminLoginDto {
   @ApiProperty()
@@ -9,5 +9,8 @@ export class AdminLoginDto {
   @ApiProperty()
   @IsString()
   @MinLength(8)
+  // bcrypt is deliberately slow; an unbounded password is a cheap way to
+  // tie the server up.
+  @MaxLength(128)
   password!: string;
 }

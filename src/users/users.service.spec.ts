@@ -13,6 +13,7 @@ function makePrisma() {
     deviceToken: { deleteMany: vi.fn() },
     instagramConnection: { deleteMany: vi.fn() },
     youtubeConnection: { deleteMany: vi.fn() },
+    instagramOAuthTransaction: { deleteMany: vi.fn() },
     $transaction: vi.fn((ops: unknown[]) => Promise.all(ops)),
   };
 }
@@ -32,7 +33,7 @@ describe("UsersService", () => {
   beforeEach(() => {
     prisma = makePrisma();
     cashfree = makeCashfree();
-    service = new UsersService(prisma as never, {} as never, cashfree as never);
+    service = new UsersService(prisma as never, {} as never, cashfree as never, { deleteIdentityFile: vi.fn().mockResolvedValue(true) } as never);
   });
 
   describe("submitPan", () => {

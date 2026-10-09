@@ -49,6 +49,10 @@ export class CampaignAccessService {
       return;
     }
 
+    // Unreachable in practice: brand accounts can't sign in or hold a
+    // session (see BRAND_ACCESS_CLOSED), so no request arrives with this
+    // role. Kept because the campaign rules for a brand-owned edit are
+    // still exercised through it.
     if (role === UserRole.brand) {
       const brandProfileId = await this.getBrandProfileIdForUser(userId);
       if (brandProfileId && campaign.brandProfileId === brandProfileId) {
@@ -80,6 +84,16 @@ export class CampaignAccessService {
       code: "FORBIDDEN",
       message: "No access to this campaign",
     });
+  }
+
+  /** Whether this account still exists, is active and still has the role
+   * its token claims — the same check the API makes on every request. */
+  async isAccountActive(userId: string, role: UserRole): Promise<boolean> {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { isActive: true, role: true },
+    });
+    return Boolean(user && user.isActive && user.role === role);
   }
 
   /** Whether a socket may subscribe to a campaign's realtime room. Brand,

@@ -173,6 +173,10 @@ export class CreatorProfilesService {
     platform: "instagram" | "youtube" | "twitter",
     handleOrUrl: string,
   ) {
+    // Refuses anything that isn't a username or a link on the platform's
+    // own domain, before it is stored and shown to admins as a link.
+    this.apify.normalizeProfileUrl(platform, handleOrUrl);
+
     const [profile, user] = await Promise.all([
       this.assertOwnership(userId, profileId),
       this.prisma.user.findUnique({

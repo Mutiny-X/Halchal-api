@@ -363,8 +363,17 @@ export class CampaignReportService {
     }
     try {
       const page = await browser.newPage();
-      // No external resources (logo is inline SVG, system fonts only), so
-      // there's nothing async to wait on beyond the page's own load.
+      // The report is static HTML with inline SVG and system fonts: it needs
+      // no script and no network. Both are switched off, so even if some
+      // text ever reached the page unescaped it could neither run nor call
+      // out from the server.
+      await page.setJavaScriptEnabled(false);
+      await page.setRequestInterception(true);
+      page.on("request", (request) => {
+        const url = request.url();
+        if (url.startsWith("data:") || url === "about:blank") void request.continue();
+        else void request.abort();
+      });
       await page.setContent(html, { waitUntil: "load", timeout: 30_000 });
       const pdf = await page.pdf({
         format: "A4",

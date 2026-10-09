@@ -6,6 +6,7 @@ function makeService() {
   const prisma = {
     otpSession: {
       findMany: vi.fn(),
+      count: vi.fn().mockResolvedValue(0),
       create: vi.fn(),
       findFirst: vi.fn(),
       update: vi.fn(),

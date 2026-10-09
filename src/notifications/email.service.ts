@@ -1,3 +1,4 @@
+import { maskEmail } from "../common/mask";
 import { Injectable, Logger } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import nodemailer from "nodemailer";
@@ -129,7 +130,7 @@ export class EmailService {
         throw new Error(error.message);
       }
 
-      this.logger.log(`Email sent via Resend to ${email}: ${subject}`);
+      this.logger.log(`Email sent via Resend to ${maskEmail(email)}: ${subject}`);
       return;
     }
 
@@ -144,6 +145,6 @@ export class EmailService {
     });
 
     await transport.sendMail({ from, to: email, subject, text });
-    this.logger.log(`Email sent via SMTP to ${email}: ${subject}`);
+    this.logger.log(`Email sent via SMTP to ${maskEmail(email)}: ${subject}`);
   }
 }

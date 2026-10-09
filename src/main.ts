@@ -22,6 +22,16 @@ import { Logger } from "nestjs-pino";
 import { AppModule } from "./app.module";
 // force restart: pick up updated INSTAGRAM_OAUTH_SCOPES from .env
 
+/** The websites allowed to call the API. Never "any website": with nothing
+ * configured (local development only — production refuses to start without
+ * CORS_ORIGINS) it is the local portal. */
+function corsOrigins(): string[] {
+  return (process.env.CORS_ORIGINS ?? "http://localhost:3000")
+    .split(",")
+    .map((o) => o.trim())
+    .filter(Boolean);
+}
+
 async function bootstrap(): Promise<void> {
   const app = await NestFactory.create<NestExpressApplication>(AppModule, {
     bufferLogs: true,
@@ -38,7 +48,7 @@ async function bootstrap(): Promise<void> {
     }),
   );
   app.enableCors({
-    origin: process.env.CORS_ORIGINS?.split(",").map((o) => o.trim()) ?? true,
+    origin: corsOrigins(),
     credentials: true,
   });
 
@@ -57,19 +67,25 @@ async function bootstrap(): Promise<void> {
     },
   });
 
-  const swaggerConfig = new DocumentBuilder()
-    .setTitle("Halchal API")
-    .setDescription("Creator + brand platform API")
-    .setVersion("0.1.0")
-    .addBearerAuth()
-    .build();
-  const document = SwaggerModule.createDocument(app, swaggerConfig);
-  SwaggerModule.setup("docs", app, document);
+  // The interactive API reference lists every endpoint and input. Handy in
+  // development; in production it is a ready-made map for an attacker, so
+  // it is only served there when ENABLE_API_DOCS=true.
+  const docsEnabled = process.env.NODE_ENV !== "production" || process.env.ENABLE_API_DOCS === "true";
+  if (docsEnabled) {
+    const swaggerConfig = new DocumentBuilder()
+      .setTitle("Halchal API")
+      .setDescription("Creator + brand platform API")
+      .setVersion("0.1.0")
+      .addBearerAuth()
+      .build();
+    const document = SwaggerModule.createDocument(app, swaggerConfig);
+    SwaggerModule.setup("docs", app, document);
+  }
 
   const port = Number(process.env.PORT ?? 3001);
   await app.listen(port);
   app.get(Logger).log(`API listening on http://localhost:${port}`);
-  app.get(Logger).log(`OpenAPI docs at http://localhost:${port}/docs`);
+  if (docsEnabled) app.get(Logger).log(`OpenAPI docs at http://localhost:${port}/docs`);
 }
 
 bootstrap();

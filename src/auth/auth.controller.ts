@@ -1,7 +1,10 @@
-import { Body, Controller, Get, Post, Query } from "@nestjs/common";
+import { Body, Controller, Get, Logger, Post, Query, Req } from "@nestjs/common";
+import type { Request } from "express";
 import { ApiOkResponse, ApiTags } from "@nestjs/swagger";
 import { Throttle } from "@nestjs/throttler";
 
+import { ActivityLogService } from "../activity/activity-log.service";
+import { maskEmail } from "../common/mask";
 import { CampaignInviteService } from "./campaign-invite.service";
 import { AuthService } from "./auth.service";
 import { OtpService } from "./otp.service";
@@ -21,11 +24,38 @@ import { AuthResponseDto } from "./dto/auth-response.dto";
 @ApiTags("auth")
 @Controller("auth")
 export class AuthController {
+  private readonly logger = new Logger(AuthController.name);
+
   constructor(
     private readonly auth: AuthService,
     private readonly campaignInvites: CampaignInviteService,
     private readonly otp: OtpService,
+    private readonly activityLog: ActivityLogService,
   ) {}
+
+  /** Sign-in history: every successful password sign-in is recorded with
+   * where it came from; every failed one is written to the server log
+   * (there is no account to attach it to) with the email masked. */
+  private async recordedSignIn<T extends { user: { id: string; role: string } }>(
+    req: Request,
+    email: string,
+    portal: "team" | "admin",
+    signIn: () => Promise<T>,
+  ): Promise<T> {
+    const from = { ip: req.ip ?? null, userAgent: String(req.headers["user-agent"] ?? "").slice(0, 200) };
+    try {
+      const result = await signIn();
+      await this.activityLog.log(result.user.id, "auth.signed_in", {
+        targetType: "User",
+        targetId: result.user.id,
+        metadata: { portal, role: result.user.role, ...from },
+      });
+      return result;
+    } catch (error) {
+      this.logger.warn(`Sign-in failed (${portal}) for ${maskEmail(email)} from ${from.ip ?? "unknown"}`);
+      throw error;
+    }
+  }
 
   @Post("brand/register")
   @ApiOkResponse({ type: AuthResponseDto })
@@ -37,15 +67,15 @@ export class AuthController {
   @Post("brand/login")
   @Throttle({ default: { limit: 10, ttl: 60_000 } })
   @ApiOkResponse({ type: AuthResponseDto })
-  loginBrand(@Body() dto: BrandLoginDto) {
-    return this.auth.loginBrand(dto);
+  loginBrand(@Req() req: Request, @Body() dto: BrandLoginDto) {
+    return this.recordedSignIn(req, dto.email, "team", () => this.auth.loginBrand(dto));
   }
 
   @Post("admin/login")
   @Throttle({ default: { limit: 10, ttl: 60_000 } })
   @ApiOkResponse({ type: AuthResponseDto })
-  loginAdmin(@Body() dto: AdminLoginDto) {
-    return this.auth.loginAdmin(dto);
+  loginAdmin(@Req() req: Request, @Body() dto: AdminLoginDto) {
+    return this.recordedSignIn(req, dto.email, "admin", () => this.auth.loginAdmin(dto));
   }
 
   @Post("brand/forgot-password")
@@ -101,13 +131,19 @@ export class AuthController {
     });
   }
 
+  // Kept at the general limit on purpose. A refresh token is 48 random
+  // bytes, so guessing isn't the risk — and many creators on one mobile
+  // network share a single address, so a tight per-address limit here would
+  // block real people rather than attackers.
   @Post("refresh")
+  @Throttle({ default: { limit: 100, ttl: 60_000 } })
   @ApiOkResponse({ type: AuthResponseDto })
   refresh(@Body() dto: RefreshTokenDto) {
     return this.auth.refresh(dto.refreshToken);
   }
 
   @Post("logout")
+  @Throttle({ default: { limit: 30, ttl: 60_000 } })
   logout(@Body() dto: RefreshTokenDto) {
     return this.auth.logout(dto.refreshToken);
   }

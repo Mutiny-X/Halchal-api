@@ -9,6 +9,8 @@ import {
   MinLength,
 } from "class-validator";
 
+import { IsAcceptablePassword, PASSWORD_MIN_LENGTH } from "../password-policy";
+
 export class BrandRegisterDto {
   @ApiProperty({ example: "brand@company.in" })
   @IsEmail()
@@ -46,6 +48,7 @@ export class BrandLoginDto {
   @ApiProperty()
   @IsString()
   @MinLength(8)
+  @MaxLength(128)
   password!: string;
 }
 
@@ -62,15 +65,15 @@ export class BrandResetPasswordDto {
   @MaxLength(128)
   token!: string;
 
-  @ApiProperty({ minLength: 8 })
+  @ApiProperty({ minLength: PASSWORD_MIN_LENGTH })
   @IsString()
-  @MinLength(8)
-  @MaxLength(128)
+  @IsAcceptablePassword()
   password!: string;
 }
 
 export class RefreshTokenDto {
   @ApiProperty()
   @IsString()
+  @MaxLength(256)
   refreshToken!: string;
 }

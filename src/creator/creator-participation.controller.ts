@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   Body,
   Controller,
   Get,
@@ -14,7 +15,9 @@ import {
 import { FileInterceptor } from "@nestjs/platform-express";
 import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
 import { UserRole } from "@prisma/client";
-import { memoryStorage } from "multer";
+import { randomBytes } from "node:crypto";
+import { tmpdir } from "node:os";
+import { diskStorage } from "multer";
 
 import { CurrentUser } from "../common/decorators/current-user.decorator";
 import { Roles } from "../common/decorators/roles.decorator";
@@ -25,6 +28,7 @@ import { SubmitDraftDto } from "../participation/dto/submit-draft.dto";
 import { SubmitLiveProofDto } from "../participation/dto/submit-live-proof.dto";
 import { ParticipationService } from "../participation/participation.service";
 import { ObjectStorageService } from "../storage/object-storage.service";
+import { DeliverableOwnerGuard } from "./deliverable-owner.guard";
 
 @ApiTags("creator")
 @ApiBearerAuth()
@@ -75,20 +79,31 @@ export class CreatorParticipationController {
   }
 
   @Post("deliverables/:id/upload-draft")
+  // Ownership is checked before the file is received, and the file goes to
+  // a temp file on disk, not into memory — a 500 MB video per request in
+  // RAM would let a handful of uploads take the API down.
+  @UseGuards(DeliverableOwnerGuard)
   @UseInterceptors(
     FileInterceptor("file", {
-      storage: memoryStorage(),
-      limits: { fileSize: 500 * 1024 * 1024 },
+      storage: diskStorage({
+        destination: tmpdir(),
+        filename: (_req, _file, cb) => cb(null, `halchal-draft-${Date.now()}-${randomBytes(8).toString("hex")}`),
+      }),
+      limits: { fileSize: 500 * 1024 * 1024, files: 1 },
     }),
   )
   async uploadDraftFile(
     @Req() req: import("express").Request,
     @UploadedFile() file: Express.Multer.File,
   ) {
-    const result = await this.storage.saveUploadedFile("creator-drafts", {
-      buffer: file.buffer,
+    if (!file?.path) {
+      throw new BadRequestException({ code: "VALIDATION_ERROR", message: "File is required" });
+    }
+    const result = await this.storage.saveUploadedFileFromPath("creator-drafts", {
+      path: file.path,
       originalname: file.originalname,
       mimetype: file.mimetype,
+      size: file.size,
     });
     // If the URL is a relative path (local disk, no R2), make it absolute
     const url = result.url.startsWith("http")

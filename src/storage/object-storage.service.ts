@@ -10,13 +10,14 @@ import {
 } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { randomBytes } from "node:crypto";
-import { writeFileSync } from "node:fs";
-import { unlink } from "node:fs/promises";
-import { join } from "node:path";
+import { createReadStream, writeFileSync } from "node:fs";
+import { copyFile, unlink } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { basename, dirname, join, resolve } from "node:path";
 
 import type { Env } from "../config/env";
 import { DIRECT_UPLOAD_CONTENT_TYPES, type DetectedFileType } from "../common/file-signature";
-import { ensureUploadDir, uploadFilename } from "../common/upload.util";
+import { ensureUploadDir, safeUploadContentType, uploadFilename } from "../common/upload.util";
 
 export type PresignedUpload = {
   uploadUrl: string;
@@ -79,7 +80,9 @@ export class ObjectStorageService {
     const key = `${folder}/${filename}`;
 
     if (this.isR2Configured()) {
-      await this.uploadToR2(key, file.buffer, file.mimetype);
+      // Served type follows the stored (allow-listed) extension, not the
+      // type the uploader claimed.
+      await this.uploadToR2(key, file.buffer, safeUploadContentType(filename));
       return buildR2UploadResponse(
         this.config.get("S3_PUBLIC_BASE_URL", { infer: true }),
         key,
@@ -88,6 +91,54 @@ export class ObjectStorageService {
     }
 
     return this.saveToLocalDisk(folder, filename, file);
+  }
+
+  /**
+   * Same as saveUploadedFile, for a file multer already wrote to a temp
+   * path — it is streamed to storage rather than held in memory, so a
+   * large video costs disk, not RAM. The temp file is always removed.
+   */
+  async saveUploadedFileFromPath(
+    folder: string,
+    file: { path: string; originalname: string; mimetype: string; size: number },
+  ): Promise<StoredUploadResult> {
+    // Only a temp file this server created itself (see the upload route's
+    // diskStorage: the system temp folder, a name we generate) is ever
+    // read, copied or removed here — never a path taken from a request.
+    const tempPath = resolve(file.path);
+    if (dirname(tempPath) !== resolve(tmpdir()) || !/^halchal-draft-[0-9]+-[0-9a-f]+$/.test(basename(tempPath))) {
+      throw new BadRequestException({ code: "VALIDATION_ERROR", message: "Upload could not be read" });
+    }
+    const filename = uploadFilename(file.originalname, file.mimetype);
+    const key = `${folder}/${filename}`;
+    try {
+      if (this.isR2Configured()) {
+        if (!this.s3Client) {
+          throw new InternalServerErrorException("Object storage is not configured");
+        }
+        try {
+          await this.s3Client.send(
+            new PutObjectCommand({
+              Bucket: this.config.get("S3_BUCKET", { infer: true }),
+              Key: key,
+              Body: createReadStream(tempPath),
+              ContentLength: file.size,
+              ContentType: safeUploadContentType(filename),
+            }),
+          );
+        } catch (error) {
+          throw new InternalServerErrorException("Failed to upload file to object storage", { cause: error });
+        }
+        return buildR2UploadResponse(this.config.get("S3_PUBLIC_BASE_URL", { infer: true }), key, file.originalname);
+      }
+
+      const dir = ensureUploadDir(folder);
+      await copyFile(tempPath, join(dir, filename));
+      const path = `/uploads/${folder}/${filename}`;
+      return { url: path, path, name: file.originalname };
+    } finally {
+      await unlink(tempPath).catch(() => undefined);
+    }
   }
 
   /** Stores a file whose real type was already established from its bytes
@@ -322,6 +373,12 @@ export class ObjectStorageService {
 
   /** Creators' work on a campaign: drafts uploaded from the app and admin
    * copies of drafts. */
+  /** Removes one of a person's identity documents or their profile photo.
+   * Only for account deletion and the stored-Aadhaar clean-up. */
+  deleteIdentityFile(url: string): Promise<boolean> {
+    return this.deleteStoredFile(url, IDENTITY_FILE_FOLDERS);
+  }
+
   deleteCreatorWorkFile(url: string): Promise<boolean> {
     return this.deleteStoredFile(url, CREATOR_WORK_FOLDERS);
   }
@@ -375,6 +432,9 @@ export class ObjectStorageService {
 /** Folders cleanup may ever delete from — never avatars, logos or KYC. */
 export const CAMPAIGN_FILE_FOLDERS = ["cover-images", "reference-assets"] as const;
 export const CREATOR_WORK_FOLDERS = ["creator-drafts", "admin-draft-copies"] as const;
+/** A person's own identity documents and profile photo — removed only when
+ * that person deletes their account. */
+export const IDENTITY_FILE_FOLDERS = ["kyc-documents", "pan-documents", "aadhaar-documents", "avatars"] as const;
 /** A stored file name: no leading dot (no "..", no hidden files). */
 const FILE_NAME = /^[A-Za-z0-9_-][A-Za-z0-9._-]*$/;
 

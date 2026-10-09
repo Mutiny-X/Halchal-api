@@ -1,5 +1,4 @@
 import {
-  Body,
   Controller,
   Get,
   GoneException,
@@ -65,12 +64,13 @@ export class CreatorSubmissionsController {
     });
   }
 
+  // Retired: this let a creator report their own view count. Views come
+  // from the platform through the creator's connected account instead.
   @Patch("submissions/:id/sync-performance")
-  syncPerformance(
-    @CurrentUser() user: AuthJwtPayload,
-    @Param("id") id: string,
-    @Body() body: { views: number },
-  ) {
-    return this.submissions.syncPerformance(user.sub, id, body.views);
+  syncPerformance() {
+    throw new GoneException({
+      code: "DEPRECATED",
+      message: "View counts are synced automatically from your connected account.",
+    });
   }
 }

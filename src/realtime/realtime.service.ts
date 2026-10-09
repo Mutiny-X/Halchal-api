@@ -24,6 +24,12 @@ export type ParticipationJoinedPayload = {
 export class RealtimeService {
   constructor(private readonly gateway: RealtimeGateway) {}
 
+  /** Ends a user's open live-update connections (account deactivated or
+   * removed). Best-effort: a failure here never blocks the deactivation. */
+  async disconnectUser(userId: string): Promise<void> {
+    await this.gateway.disconnectUser(userId).catch(() => undefined);
+  }
+
   private broadcastDeliverableToBrand(
     event: string,
     payload: DeliverableEventPayload,

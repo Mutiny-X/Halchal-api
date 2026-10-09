@@ -7,6 +7,7 @@ import { CreatorProfilesModule } from "../creator-profiles/creator-profiles.modu
 import { FaqsModule } from "../faqs/faqs.module";
 import { MarketplaceModule } from "../marketplace/marketplace.module";
 import { NotificationsModule } from "../notifications/notifications.module";
+import { AdminWithdrawalsController } from "../payouts/admin-withdrawals.controller";
 import { PayoutsModule } from "../payouts/payouts.module";
 import { RealtimeModule } from "../realtime/realtime.module";
 import { StorageModule } from "../storage/storage.module";
@@ -31,7 +32,7 @@ import { CampaignReportService } from "./campaign-report.service";
     SupportModule,
     WalletModule,
   ],
-  controllers: [AdminController],
+  controllers: [AdminController, AdminWithdrawalsController],
   providers: [AdminService, CampaignReportService],
 })
 export class AdminModule {}
