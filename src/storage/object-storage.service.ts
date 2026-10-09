@@ -375,12 +375,74 @@ export class ObjectStorageService {
    * copies of drafts. */
   /** Removes one of a person's identity documents or their profile photo.
    * Only for account deletion and the stored-Aadhaar clean-up. */
-  deleteIdentityFile(url: string): Promise<boolean> {
+  async deleteIdentityFile(url: string): Promise<boolean> {
+    if (isPrivateDocumentRef(url)) {
+      const key = url.slice(PRIVATE_DOCUMENT_PREFIX.length);
+      if (!PRIVATE_DOCUMENT_KEY.test(key) || !this.isPrivateDocumentStorageConfigured()) return false;
+      await this.requireR2().send(new DeleteObjectCommand({ Bucket: this.privateBucket(), Key: key }));
+      return true;
+    }
     return this.deleteStoredFile(url, IDENTITY_FILE_FOLDERS);
   }
 
   deleteCreatorWorkFile(url: string): Promise<boolean> {
     return this.deleteStoredFile(url, CREATOR_WORK_FOLDERS);
+  }
+
+  // ── Identity documents (KYC / PAN / Aadhaar) ───────────────────────────
+  //
+  // The public bucket serves every file to anyone who has its link, forever.
+  // Identity documents go in a separate PRIVATE bucket instead and are only
+  // ever opened through a signed link that lasts minutes. Without
+  // S3_PRIVATE_BUCKET (local development) they fall back to normal storage.
+
+  isPrivateDocumentStorageConfigured(): boolean {
+    return this.isR2Configured() && Boolean(this.config.get("S3_PRIVATE_BUCKET", { infer: true }));
+  }
+
+  private privateBucket(): string {
+    const bucket = this.config.get("S3_PRIVATE_BUCKET", { infer: true });
+    if (!bucket) throw new InternalServerErrorException("Private document storage is not configured");
+    return bucket;
+  }
+
+  async saveIdentityDocument(folder: string, file: UploadedFilePayload): Promise<StoredUploadResult> {
+    if (!this.isPrivateDocumentStorageConfigured()) return this.saveUploadedFile(folder, file);
+
+    const filename = uploadFilename(file.originalname, file.mimetype);
+    const key = `${folder}/${filename}`;
+    if (!PRIVATE_DOCUMENT_KEY.test(key)) {
+      throw new InternalServerErrorException("Not an identity document folder");
+    }
+    try {
+      await this.requireR2().send(
+        new PutObjectCommand({
+          Bucket: this.privateBucket(),
+          Key: key,
+          Body: file.buffer,
+          ContentType: safeUploadContentType(filename),
+          CacheControl: "private, no-store",
+        }),
+      );
+    } catch (error) {
+      throw new InternalServerErrorException("Failed to upload file to object storage", { cause: error });
+    }
+    return { url: `${PRIVATE_DOCUMENT_PREFIX}${key}`, path: key, name: file.originalname };
+  }
+
+  /** The link to show a person for a stored document: a signed, short-lived
+   * link for a private one, the stored link unchanged for older public/local
+   * files, null when there is none (or it can't be signed). */
+  async resolveDocumentUrl(stored: string | null | undefined, expiresInSeconds = 600): Promise<string | null> {
+    if (!stored) return null;
+    if (!isPrivateDocumentRef(stored)) return stored;
+    const key = stored.slice(PRIVATE_DOCUMENT_PREFIX.length);
+    if (!PRIVATE_DOCUMENT_KEY.test(key) || !this.isPrivateDocumentStorageConfigured()) return null;
+    return getSignedUrl(
+      this.requireR2() as unknown as Parameters<typeof getSignedUrl>[0],
+      new GetObjectCommand({ Bucket: this.privateBucket(), Key: key }),
+      { expiresIn: expiresInSeconds },
+    );
   }
 
   publicUrlFor(key: string): string {
@@ -427,6 +489,16 @@ export class ObjectStorageService {
       name: file.originalname,
     };
   }
+}
+
+/** Marks a stored identity document that lives in the PRIVATE bucket: the
+ * database holds "private:<folder>/<file>", never a link anyone could open.
+ * Readers get a short-lived signed link from resolveDocumentUrl(). */
+export const PRIVATE_DOCUMENT_PREFIX = "private:";
+const PRIVATE_DOCUMENT_KEY = /^(kyc-documents|pan-documents|aadhaar-documents)\/[A-Za-z0-9._-]+$/;
+
+export function isPrivateDocumentRef(value: string | null | undefined): value is string {
+  return typeof value === "string" && value.startsWith(PRIVATE_DOCUMENT_PREFIX);
 }
 
 /** Folders cleanup may ever delete from — never avatars, logos or KYC. */

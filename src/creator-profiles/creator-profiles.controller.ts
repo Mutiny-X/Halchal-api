@@ -7,7 +7,6 @@ import {
   Param,
   Patch,
   Post,
-  Query,
   UseGuards,
 } from "@nestjs/common";
 import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
@@ -79,9 +78,8 @@ export class CreatorProfilesController {
   getYoutubeAuthUrl(
     @CurrentUser() user: AuthJwtPayload,
     @Param("id") id: string,
-    @Query("state") state?: string,
   ) {
-    return this.youtubeOAuth.authUrl(user.sub, id, state);
+    return this.youtubeOAuth.authUrl(user.sub, id);
   }
 
   @Post(":id/social/youtube/connect")
@@ -89,8 +87,9 @@ export class CreatorProfilesController {
     @CurrentUser() user: AuthJwtPayload,
     @Param("id") id: string,
     @Body("code") code: string,
+    @Body("state") state: string,
   ) {
-    return this.youtubeOAuth.connect(user.sub, id, code);
+    return this.youtubeOAuth.connect(user.sub, id, code, state);
   }
 
   @Post(":id/social/:platform")

@@ -186,6 +186,7 @@ export class AdminRolesService {
         role: UserRole.admin,
         email,
         passwordHash,
+        mustChangePassword: true,
         displayName: dto.name.trim(),
         adminRoleId: dto.adminRoleId ?? null,
         termsAcceptedAt: new Date(),

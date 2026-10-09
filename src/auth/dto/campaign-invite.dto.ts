@@ -7,7 +7,7 @@ export class CampaignInviteAcceptDto {
   @MinLength(10)
   token!: string;
 
-  @ApiPropertyOptional({ description: "Required when creating a new brand account" })
+  @ApiPropertyOptional({ description: "Required when creating a new brand account, and to confirm ownership when the invited email already has one" })
   @IsOptional()
   @IsString()
   @MinLength(8)

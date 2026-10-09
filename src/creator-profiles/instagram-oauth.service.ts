@@ -18,6 +18,7 @@ import {
 
 import type { PlatformViewResult } from "../common/apify.service";
 import type { Env } from "../config/env";
+import { resolvePayoutKeys, type PayoutKeys } from "../payouts/payout-account-crypto";
 import { PrismaService } from "../prisma/prisma.service";
 import { CreatorProfilesService } from "./creator-profiles.service";
 
@@ -473,9 +474,11 @@ export class InstagramOAuthService {
     delete stats.instagram;
 
     await this.prisma.$transaction([
+      // Disconnecting also destroys the stored access token — a disconnected
+      // account has no business leaving a usable credential in the database.
       this.prisma.instagramConnection.updateMany({
         where: { userId, creatorProfileId },
-        data: { isConnected: false },
+        data: { isConnected: false, encryptedAccessToken: "" },
       }),
       this.prisma.creatorProfile.update({
         where: { id: creatorProfileId },
@@ -1129,13 +1132,29 @@ export class InstagramOAuthService {
 
   private encrypt(value: string): string {
     const iv = randomBytes(12);
-    const cipher = createCipheriv("aes-256-gcm", this.encryptionKey, iv);
+    const cipher = createCipheriv("aes-256-gcm", this.tokenKeys.primary, iv);
     const encrypted = Buffer.concat([cipher.update(value, "utf8"), cipher.final()]);
     const tag = cipher.getAuthTag();
     return `${iv.toString("base64url")}.${tag.toString("base64url")}.${encrypted.toString("base64url")}`;
   }
 
+  /** Reads with the dedicated key; falls back to the old login-secret-derived
+   * key only for tokens saved before the dedicated key was required. */
   private decrypt(value: string): string {
+    const keys = this.tokenKeys;
+    try {
+      return this.decryptWithKey(keys.primary, value);
+    } catch (primaryError) {
+      if (!keys.legacy) throw primaryError;
+      try {
+        return this.decryptWithKey(keys.legacy, value);
+      } catch {
+        throw primaryError;
+      }
+    }
+  }
+
+  private decryptWithKey(key: Buffer, value: string): string {
     const [ivRaw, tagRaw, encryptedRaw] = value.split(".");
     if (!ivRaw || !tagRaw || !encryptedRaw) {
       throw new BadRequestException({
@@ -1145,7 +1164,7 @@ export class InstagramOAuthService {
     }
     const decipher = createDecipheriv(
       "aes-256-gcm",
-      this.encryptionKey,
+      key,
       Buffer.from(ivRaw, "base64url"),
       // Only the full 16-byte tag is accepted; a shorter one is easier to forge.
       { authTagLength: 16 },
@@ -1181,12 +1200,10 @@ export class InstagramOAuthService {
     return `https://graph.instagram.com/${this.graphVersion}`;
   }
 
-  private get encryptionKey(): Buffer {
-    return createHash("sha256")
-      .update(
-        this.config.get("INSTAGRAM_TOKEN_ENCRYPTION_KEY", { infer: true }) ??
-          this.config.get("JWT_SECRET", { infer: true }),
-      )
-      .digest();
+  private get tokenKeys(): PayoutKeys {
+    return resolvePayoutKeys(
+      this.config.get("INSTAGRAM_TOKEN_ENCRYPTION_KEY", { infer: true }),
+      this.config.get("JWT_SECRET", { infer: true }),
+    );
   }
 }

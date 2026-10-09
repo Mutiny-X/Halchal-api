@@ -2,6 +2,8 @@ import { Controller, Get, Logger, Post, Query, Req, Res } from "@nestjs/common";
 import { ApiExcludeController } from "@nestjs/swagger";
 import type { Request, Response } from "express";
 
+import { isValidMetaSignature } from "./whatsapp-signature";
+
 /**
  * Meta Cloud API webhook handshake — required to activate a WhatsApp
  * Business number. GET verifies ownership via a shared token; POST is a
@@ -32,9 +34,15 @@ export class WhatsappWebhookController {
   }
 
   @Post()
-  receive(@Req() req: Request, @Res() res: Response) {
-    // Nothing verifies who sent this yet (no X-Hub-Signature-256 check), and
-    // the body can hold customers' phone numbers and messages — so it is
+  receive(@Req() req: Request & { rawBody?: Buffer }, @Res() res: Response) {
+    // Only Meta can sign with the app secret, so anything unsigned (or signed
+    // for different bytes) is refused before it is looked at. Refuses
+    // everything while WHATSAPP_APP_SECRET is unset.
+    if (!isValidMetaSignature(req.rawBody, req.header("x-hub-signature-256"), process.env.WHATSAPP_APP_SECRET)) {
+      res.status(403).type("text/plain").send("Invalid signature");
+      return;
+    }
+    // The body can hold customers' phone numbers and messages — so it is
     // acknowledged and counted, never written to the logs.
     const entries = Array.isArray((req.body as { entry?: unknown[] })?.entry)
       ? (req.body as { entry: unknown[] }).entry.length

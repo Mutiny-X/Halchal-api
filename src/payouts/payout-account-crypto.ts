@@ -29,3 +29,52 @@ export function decryptPayoutAccount(key: Buffer, value: string): string | null 
     decipher.final(),
   ]).toString("utf8");
 }
+
+/** The key bank numbers are written with, plus — until every row has been
+ * re-encrypted — the old JWT_SECRET-derived key they used to be written with.
+ * Before PAYOUT_ACCOUNT_ENCRYPTION_KEY was required, an unset key silently
+ * fell back to JWT_SECRET, so existing rows may still be encrypted that way:
+ * reads try the primary key first and fall back to `legacy`, writes always use
+ * `primary`. `scripts/reencrypt-payout-accounts.ts` moves rows to `primary`. */
+export type PayoutKeys = { primary: Buffer; legacy: Buffer | null };
+
+export function resolvePayoutKeys(dedicatedKey: string | undefined, jwtSecret: string | undefined): PayoutKeys {
+  if (!dedicatedKey?.trim() && !jwtSecret) throw new Error("No encryption key configured");
+  const dedicated = dedicatedKey?.trim();
+  if (!dedicated) return { primary: derivePayoutKey(jwtSecret as string), legacy: null }; // guarded above
+  return {
+    primary: derivePayoutKey(dedicated),
+    legacy: !jwtSecret || dedicated === jwtSecret ? null : derivePayoutKey(jwtSecret),
+  };
+}
+
+/** Decrypts with the primary key, falling back to the legacy one. Returns null
+ * for a value that isn't in the encrypted format; throws if no key fits. */
+export function decryptPayoutAccountWithKeys(keys: PayoutKeys, value: string): string | null {
+  try {
+    return decryptPayoutAccount(keys.primary, value);
+  } catch (primaryError) {
+    if (!keys.legacy) throw primaryError;
+    try {
+      return decryptPayoutAccount(keys.legacy, value);
+    } catch {
+      throw primaryError;
+    }
+  }
+}
+
+/** True when the value only opens with the legacy key — i.e. it still needs
+ * re-encrypting under the dedicated one. */
+export function needsPayoutReencrypt(keys: PayoutKeys, value: string): boolean {
+  if (!keys.legacy) return false;
+  try {
+    decryptPayoutAccount(keys.primary, value);
+    return false;
+  } catch {
+    try {
+      return decryptPayoutAccount(keys.legacy, value) !== null;
+    } catch {
+      return false;
+    }
+  }
+}

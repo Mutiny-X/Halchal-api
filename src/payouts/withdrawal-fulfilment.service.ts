@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   ConflictException,
+  ForbiddenException,
   Injectable,
   Logger,
   NotFoundException,
@@ -12,7 +13,7 @@ import { ActivityLogService } from "../activity/activity-log.service";
 import type { Env } from "../config/env";
 import { InAppNotificationService } from "../notifications/in-app-notification.service";
 import { PrismaService } from "../prisma/prisma.service";
-import { decryptPayoutAccount, derivePayoutKey } from "./payout-account-crypto";
+import { decryptPayoutAccountWithKeys, resolvePayoutKeys, type PayoutKeys } from "./payout-account-crypto";
 import type { PayoutSnapshot } from "./payouts.service";
 import {
   buildWithdrawalWorkbook,
@@ -50,10 +51,10 @@ export class WithdrawalFulfilmentService {
     private readonly activityLog: ActivityLogService,
   ) {}
 
-  private get encryptionKey(): Buffer {
-    return derivePayoutKey(
-      this.config.get("PAYOUT_ACCOUNT_ENCRYPTION_KEY", { infer: true }) ??
-        this.config.get("JWT_SECRET", { infer: true }),
+  private get payoutKeys(): PayoutKeys {
+    return resolvePayoutKeys(
+      this.config.get("PAYOUT_ACCOUNT_ENCRYPTION_KEY", { infer: true }),
+      this.config.get("JWT_SECRET", { infer: true }),
     );
   }
 
@@ -136,7 +137,7 @@ export class WithdrawalFulfilmentService {
       let account = "UNREADABLE - do not pay, contact Halchal";
       if (snapshot?.accountNumber) {
         try {
-          account = decryptPayoutAccount(this.encryptionKey, snapshot.accountNumber) ?? account;
+          account = decryptPayoutAccountWithKeys(this.payoutKeys, snapshot.accountNumber) ?? account;
         } catch {
           this.logger.error(`Could not decrypt the account number for withdrawal ${w.id}`);
         }
@@ -270,11 +271,28 @@ export class WithdrawalFulfilmentService {
     });
   }
 
+  /** Two-person rule (PAYOUT_REQUIRE_SECOND_ADMIN): whoever exported a batch
+   * can't also be the one who says its rows were paid or failed. */
+  private async assertSecondAdmin(withdrawalId: string, adminUserId: string): Promise<void> {
+    if (!this.config.get("PAYOUT_REQUIRE_SECOND_ADMIN", { infer: true })) return;
+    const row = await this.prisma.withdrawal.findUnique({
+      where: { id: withdrawalId },
+      select: { batch: { select: { createdByUserId: true } } },
+    });
+    if (row?.batch?.createdByUserId === adminUserId) {
+      throw new ForbiddenException({
+        code: "SECOND_ADMIN_REQUIRED",
+        message: "You exported this payment sheet, so a different admin must record its result.",
+      });
+    }
+  }
+
   async markPaid(withdrawalId: string, utrInput: string, adminUserId: string) {
     const utr = utrInput.trim();
     if (!utr) {
       throw new BadRequestException({ code: "VALIDATION_ERROR", message: "Enter the UTR / bank reference." });
     }
+    await this.assertSecondAdmin(withdrawalId, adminUserId);
 
     const { count } = await this.prisma.withdrawal.updateMany({
       where: { id: withdrawalId, status: { in: OPEN_STATUSES } },
@@ -314,6 +332,7 @@ export class WithdrawalFulfilmentService {
    * The refund restores availablePaise only — lifetimePaise counts earnings,
    * so a refund must never push a creator over the ₹1,500 gate. */
   async markFailed(withdrawalId: string, reasonInput: string, adminUserId: string) {
+    await this.assertSecondAdmin(withdrawalId, adminUserId);
     const reason = reasonInput.trim();
     if (!reason) {
       throw new BadRequestException({ code: "VALIDATION_ERROR", message: "Say why the payment failed." });
@@ -433,10 +452,10 @@ export class WithdrawalFulfilmentService {
         }
       } catch (err) {
         const message =
-          err instanceof ConflictException || err instanceof NotFoundException || err instanceof BadRequestException
+          err instanceof ConflictException || err instanceof NotFoundException || err instanceof BadRequestException || err instanceof ForbiddenException
             ? (err.getResponse() as { message?: string }).message ?? err.message
             : "Unexpected error.";
-        if (!(err instanceof ConflictException || err instanceof NotFoundException || err instanceof BadRequestException)) {
+        if (!(err instanceof ConflictException || err instanceof NotFoundException || err instanceof BadRequestException || err instanceof ForbiddenException)) {
           this.logger.error(`Import row ${row.rowNumber} (${row.withdrawalId}) failed`, err as Error);
         }
         results.push({ ...base, result: "error", message });

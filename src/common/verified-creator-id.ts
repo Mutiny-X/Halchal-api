@@ -1,3 +1,5 @@
+import { randomInt } from "node:crypto";
+
 import { PrismaService } from "../prisma/prisma.service";
 
 /** A random (never sequential — a sequential number would leak total signup
@@ -5,7 +7,7 @@ import { PrismaService } from "../prisma/prisma.service";
  * [100000000, 999999999] so every id is genuinely 9 digits, never
  * zero-padded. */
 function randomNineDigitId(): string {
-  return String(Math.floor(100_000_000 + Math.random() * 900_000_000));
+  return String(randomInt(100_000_000, 1_000_000_000));
 }
 
 /** Assigns userId a permanent verifiedCreatorId if it doesn't already have

@@ -45,6 +45,12 @@ export class AuthCleanupService {
         where: { OR: [{ expiresAt: { lt: tokenCutoff } }, { usedAt: { lt: tokenCutoff } }] },
       }),
     ]);
+    // Failure counters whose window and any lock are long over.
+    await this.prisma.loginLockout
+      ?.deleteMany({
+        where: { windowStart: { lt: new Date(now - DAY_MS) }, OR: [{ lockedUntil: null }, { lockedUntil: { lt: new Date(now) } }] },
+      })
+      .catch((error: unknown) => this.logger.warn(`Could not sweep login lockouts: ${String(error)}`));
     return { otpSessions: otp.count, refreshTokens: refresh.count, resetTokens: reset.count };
   }
 }

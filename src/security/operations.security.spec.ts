@@ -81,18 +81,18 @@ describe("Audit trail", () => {
 });
 
 describe("Lockout, password rules and log masking", () => {
-  it("unlocks by itself after the lock period", () => {
+  it("unlocks by itself after the lock period", async () => {
     let now = 0;
-    const lock = new LoginLockout(3, 60_000, 60_000, () => now);
-    for (let i = 0; i < 3; i++) lock.recordFailure("a@x.test");
-    expect(() => lock.assertNotLocked("a@x.test")).toThrow();
+    const lock = new LoginLockout(undefined, 3, 60_000, 60_000, () => now);
+    for (let i = 0; i < 3; i++) await lock.recordFailure("a@x.test");
+    await expect(lock.assertNotLocked("a@x.test")).rejects.toThrow();
     now = 61_000;
-    expect(() => lock.assertNotLocked("a@x.test")).not.toThrow();
+    await expect(lock.assertNotLocked("a@x.test")).resolves.toBeUndefined();
   });
-  it("a successful sign-in clears the count", () => {
-    const lock = new LoginLockout(3);
-    lock.recordFailure("a@x.test"); lock.recordFailure("a@x.test"); lock.recordSuccess("a@x.test"); lock.recordFailure("a@x.test"); lock.recordFailure("a@x.test");
-    expect(() => lock.assertNotLocked("a@x.test")).not.toThrow();
+  it("a successful sign-in clears the count", async () => {
+    const lock = new LoginLockout(undefined, 3);
+    await lock.recordFailure("a@x.test"); await lock.recordFailure("a@x.test"); await lock.recordSuccess("a@x.test"); await lock.recordFailure("a@x.test"); await lock.recordFailure("a@x.test");
+    await expect(lock.assertNotLocked("a@x.test")).resolves.toBeUndefined();
   });
   for (const weak of ["short1A", "1234567890", "abcdefghij", "Password123", "aaaaaaaaa1", "halchal@123"]) {
     it(`refuses the password ${weak}`, () => expect(passwordProblem(weak)).not.toBeNull());

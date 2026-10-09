@@ -35,8 +35,14 @@ function corsOrigins(): string[] {
 async function bootstrap(): Promise<void> {
   const app = await NestFactory.create<NestExpressApplication>(AppModule, {
     bufferLogs: true,
+    // Keep the exact request bytes: the WhatsApp webhook signature is over them.
+    rawBody: true,
   });
   app.useLogger(app.get(Logger));
+  // A rejected promise nobody awaited must show up in the logs, not vanish.
+  process.on("unhandledRejection", (reason) => {
+    app.get(Logger).error({ err: reason }, "Unhandled promise rejection");
+  });
   // Railway puts one proxy in front of the app. Without this every request
   // looks like it comes from that proxy, so rate limits (sign-in attempts
   // included) were shared by all users instead of counted per person.
